@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I2Sonic Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#f5f6f8; --card:#ffffff; --ink:#1b2230; --muted:#5b6474; --faint:#8a93a3; --border:#e2e5ea; --line:#7d8696;
+    --edge:#0e8f6b; --edge-soft:#e6f5ef; --edge-bd:#8fd0b8;
+    --fog:#b86e00;  --fog-soft:#fdf2df;  --fog-bd:#e9c27f;
+    --cloud:#2f63d0; --cloud-soft:#e9effc; --cloud-bd:#a3bcef;
+    --hw:#f0f1f4; --hw-bd:#aab1bd;
+    --tab-ink:#ffffff;
+    --shadow:0 1px 2px rgba(16,24,40,.05),0 1px 3px rgba(16,24,40,.06);
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1218; --card:#171b23; --ink:#e7eaf0; --muted:#9aa3b3; --faint:#6f7889; --border:#272d38; --line:#768092;
+      --edge:#3cc99c; --edge-soft:#0f2620; --edge-bd:#2a6b56;
+      --fog:#f0ae45;  --fog-soft:#281f10;  --fog-bd:#7a5823;
+      --cloud:#7aa2ff; --cloud-soft:#121b30; --cloud-bd:#34508a;
+      --hw:#1f232b; --hw-bd:#4a515e;
+      --tab-ink:#0f1218;
+      --shadow:none;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1120px;margin:0 auto;padding:40px 24px 64px}
+  @media (max-width:640px){.wrap{padding:24px 16px 48px}}
+
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--edge);font-weight:500}
+  h1{font-size:30px;line-height:1.2;margin:8px 0 10px;letter-spacing:-.02em}
+  .lede{color:var(--muted);max-width:760px;margin:0 0 24px;font-size:16px}
+  h2{font-size:19px;margin:48px 0 4px;letter-spacing:-.01em;display:flex;align-items:baseline;gap:10px}
+  h2 .n{font-family:var(--mono);font-size:13px;color:var(--faint);font-weight:500}
+  .sub{color:var(--muted);margin:0 0 16px;max-width:800px;font-size:14px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow)}
+
+  /* tier cards */
+  .tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media (max-width:820px){.tiers{grid-template-columns:1fr}}
+  .tier{padding:16px 18px;border-top:4px solid var(--c)}
+  .tier h3{margin:0;font-size:15px;color:var(--c);letter-spacing:.04em}
+  .tier .where{font-size:13px;color:var(--muted);margin:2px 0 12px}
+  .tier dl{margin:0;display:grid;grid-template-columns:44px 1fr;gap:6px 10px;font-size:13.5px}
+  .tier dt{color:var(--faint);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding-top:2px}
+  .tier dd{margin:0}
+  .t-edge{--c:var(--edge)} .t-fog{--c:var(--fog)} .t-cloud{--c:var(--cloud)}
+
+  /* diagrams */
+  .diagram{padding:14px;overflow-x:auto}
+  .diagram svg{display:block;width:100%;height:auto}
+  .diagram svg.arch{min-width:880px}
+  .diagram svg.states{min-width:760px}
+  .legend{display:flex;flex-wrap:wrap;gap:8px 18px;padding:12px 4px 0;font-size:12.5px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:12px;height:12px;border-radius:3px;border:1.5px solid var(--c);background:var(--s)}
+  .sw.hw{border-style:dashed}
+  .caption{font-size:13px;color:var(--muted);margin:12px 2px 0}
+
+  .sv text{font-family:var(--sans)}
+  .b-cloud{fill:var(--cloud-soft);stroke:var(--cloud-bd)}
+  .b-fog{fill:var(--fog-soft);stroke:var(--fog-bd)}
+  .b-edge{fill:var(--edge-soft);stroke:var(--edge-bd)}
+  .tab-cloud{fill:var(--cloud)} .tab-fog{fill:var(--fog)} .tab-edge{fill:var(--edge)}
+  .tab-t{fill:var(--tab-ink);font-size:11.5px;font-weight:700;letter-spacing:.14em}
+  .bx{fill:var(--card);stroke-width:1.4}
+  .bx-cloud{stroke:var(--cloud)} .bx-fog{stroke:var(--fog)} .bx-edge{stroke:var(--edge)}
+  .bx-hw{fill:var(--hw);stroke:var(--hw-bd);stroke-width:1.3;stroke-dasharray:4 3}
+  .strip{fill:var(--card);stroke:var(--edge);stroke-width:1.4}
+  .st-b{fill:var(--ink);font-size:12.5px;font-weight:600}
+  .st-m{fill:var(--muted);font-size:11.5px}
+  .bt{fill:var(--ink);font-size:13.5px;font-weight:600;text-anchor:middle}
+  .bs{fill:var(--muted);font-size:11px;text-anchor:middle}
+  .sv text.hwt{fill:var(--ink);font-family:var(--mono);font-size:11.5px;text-anchor:middle}
+  .ln{stroke:var(--line);stroke-width:1.5;fill:none}
+  .ln-d{stroke-dasharray:5 4}
+  .lb{fill:var(--muted);font-size:10.5px}
+  .why{fill:var(--faint);font-size:11px;font-style:italic}
+  .why-b{fill:var(--muted);font-weight:600;font-style:normal}
+  .ah{fill:var(--line)}
+
+  /* pipelines */
+  .pipes{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:920px){.pipes{grid-template-columns:1fr}}
+  .pipe{padding:16px 18px 14px}
+  .pipe header{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+  .num{width:24px;height:24px;border-radius:50%;background:var(--ink);color:var(--card);font-size:12px;font-weight:700;display:grid;place-items:center;flex:none}
+  .pipe h3{margin:0;font-size:15.5px}
+  .tags{display:flex;gap:4px;flex-wrap:wrap}
+  .tag{font-size:10px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:2px 7px;border-radius:999px;color:var(--c);background:var(--s);border:1px solid var(--b)}
+  .edge{--c:var(--edge);--s:var(--edge-soft);--b:var(--edge-bd)}
+  .fog{--c:var(--fog);--s:var(--fog-soft);--b:var(--fog-bd)}
+  .cloud{--c:var(--cloud);--s:var(--cloud-soft);--b:var(--cloud-bd)}
+  .lat{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--muted);background:var(--bg);border:1px solid var(--border);padding:2px 8px;border-radius:6px;white-space:nowrap}
+  .pipe dl{display:grid;grid-template-columns:48px 1fr;gap:9px 10px;margin:0;font-size:13.5px}
+  .pipe dt{color:var(--faint);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding-top:3px}
+  .pipe dd{margin:0}
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:5px}
+  .chip{font-size:12px;line-height:1.4;padding:3px 8px;border-radius:6px;background:var(--s);border:1px solid var(--b);color:var(--ink);white-space:nowrap}
+  .chip.hw{--s:var(--hw);--b:var(--hw-bd);border-style:dashed;font-family:var(--mono);font-size:11.5px}
+  .chip.plain{--s:transparent;--b:var(--border)}
+  .flow i{font-style:normal;color:var(--faint);font-size:12px}
+  .note{font-size:12.5px;color:var(--muted);margin-top:12px;padding-top:10px;border-top:1px dashed var(--border)}
+  .note b{color:var(--ink);font-weight:600}
+
+  /* tables */
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:920px){.grid2{grid-template-columns:1fr}}
+  .tbl{overflow-x:auto}
+  .tbl h3{font-size:14px;margin:0;padding:14px 16px 4px;display:flex;align-items:center;gap:8px}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:600;padding:10px 16px;border-bottom:1px solid var(--border)}
+  td{padding:8px 16px;border-bottom:1px solid var(--border);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .pin{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+  .ok{color:var(--edge);font-weight:600}
+  .chk{color:var(--fog);font-weight:600}
+  td.dim{color:var(--muted)}
+  .mt{margin-top:14px}
+
+  .notes{margin:0;padding:16px 18px 16px 36px;display:grid;gap:7px;font-size:13.5px}
+  .notes li::marker{color:var(--edge)}
+  .notes b{font-weight:600}
+
+  /* phases */
+  .phase th:not(:first-child),.phase td:not(:first-child){width:38%}
+  .phase td:first-child{font-weight:600}
+
+  /* build order */
+  .steps{list-style:none;margin:0;padding:0;display:grid;gap:8px;counter-reset:s}
+  .steps li{counter-increment:s;display:flex;gap:14px;align-items:center;padding:11px 16px;flex-wrap:wrap}
+  .steps li::before{content:counter(s);font-family:var(--mono);font-size:12px;font-weight:500;color:var(--faint);width:18px;flex:none}
+  .steps .txt{flex:1 1 380px}
+  .steps .txt b{font-weight:600}
+
+  footer{margin-top:40px;font-size:12.5px;color:var(--faint);border-top:1px solid var(--border);padding-top:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="eyebrow">I2Sonic · ESP32-S3 N16R8</div>
+  <h1>Smart speaker architecture — edge, fog, cloud</h1>
+  <p class="lede">The S3 handles everything it can on its own: wake word, fixed commands, switching and playback. It only sends your speech upstream when it needs a real LLM.</p>
+
+  <div class="tiers">
+    <div class="card tier t-edge">
+      <h3>EDGE</h3>
+      <div class="where">ESP32-S3 on the speaker</div>
+      <dl>
+        <dt>Runs</dt><dd>Audio front-end, WakeNet, MultiNet, Intent Router, Local Actions, Audio Player</dd>
+        <dt>Why</dt><dd>Instant, offline, private, free</dd>
+      </dl>
+    </div>
+    <div class="card tier t-fog">
+      <h3>FOG</h3>
+      <div class="where">Laptop on the same Wi-Fi · Phase 1</div>
+      <dl>
+        <dt>Runs</dt><dd>Orchestrator, faster-whisper (speech→text), Piper (text→speech), music lookup</dd>
+        <dt>Why</dt><dd>Compute the S3 can't do; API keys stay off the device</dd>
+      </dl>
+    </div>
+    <div class="card tier t-cloud">
+      <h3>CLOUD</h3>
+      <div class="where">Internet services</div>
+      <dl>
+        <dt>Runs</dt><dd>Groq LLM, web search, Telegram Bot API, music streams</dd>
+        <dt>Why</dt><dd>Big models and live data</dd>
+      </dl>
+    </div>
+  </div>
+
+  <!-- 1. ARCHITECTURE -->
+  <h2><span class="n">01</span>Architecture</h2>
+  <p class="sub">Who talks to whom, and over what. Everything external goes through the S3's single network client.</p>
+
+  <div class="card diagram">
+    <svg class="sv arch" viewBox="0 0 1048 672" role="img" aria-labelledby="archTitle">
+      <title id="archTitle">I2Sonic edge, fog and cloud architecture</title>
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" class="ah"/>
+        </marker>
+      </defs>
+
+      <!-- ===== CLOUD ===== -->
+      <rect x="20" y="16" width="1008" height="124" rx="14" class="b-cloud"/>
+      <path d="M34,16 H64 V140 H34 A14,14 0 0 1 20,126 V30 A14,14 0 0 1 34,16 Z" class="tab-cloud"/>
+      <text class="tab-t" transform="translate(42,78) rotate(-90)" text-anchor="middle" dominant-baseline="central">CLOUD</text>
+
+      <rect x="84" y="46" width="164" height="60" rx="10" class="bx bx-cloud"/>
+      <text x="166" y="71" class="bt">Telegram Bot API</text>
+      <text x="166" y="89" class="bs">remote text control</text>
+
+      <rect x="274" y="46" width="164" height="60" rx="10" class="bx bx-cloud"/>
+      <text x="356" y="71" class="bt">Music Streams</text>
+      <text x="356" y="89" class="bs">internet radio · URLs</text>
+
+      <text x="546" y="71" class="why" text-anchor="middle"><tspan class="why-b">Why cloud:</tspan></text>
+      <text x="546" y="88" class="why" text-anchor="middle">big models + live data</text>
+
+      <rect x="654" y="46" width="164" height="60" rx="10" class="bx bx-cloud"/>
+      <text x="736" y="71" class="bt">Groq LLM</text>
+      <text x="736" y="89" class="bs">gpt-oss-20b</text>
+
+      <rect x="844" y="46" width="164" height="60" rx="10" class="bx bx-cloud"/>
+      <text x="926" y="71" class="bt">Web Search</text>
+      <text x="926" y="89" class="bs">live info · LLM tool</text>
+
+      <!-- ===== FOG ===== -->
+      <rect x="20" y="164" width="1008" height="124" rx="14" class="b-fog"/>
+      <path d="M34,164 H64 V288 H34 A14,14 0 0 1 20,274 V178 A14,14 0 0 1 34,164 Z" class="tab-fog"/>
+      <text class="tab-t" transform="translate(42,226) rotate(-90)" text-anchor="middle" dominant-baseline="central">FOG · LAPTOP</text>
+
+      <text x="261" y="212" class="why" text-anchor="middle"><tspan class="why-b">Why fog:</tspan></text>
+      <text x="261" y="229" class="why" text-anchor="middle">compute the S3 can't do,</text>
+      <text x="261" y="245" class="why" text-anchor="middle">keys stay off the board</text>
+
+      <rect x="464" y="194" width="164" height="60" rx="10" class="bx bx-fog"/>
+      <text x="546" y="219" class="bt">faster-whisper</text>
+      <text x="546" y="237" class="bs">speech → text · local</text>
+
+      <rect x="654" y="194" width="164" height="60" rx="10" class="bx bx-fog"/>
+      <text x="736" y="215" class="bt">Orchestrator</text>
+      <text x="736" y="232" class="bs">WebSocket server</text>
+      <text x="736" y="246" class="bs">LLM · tools · music</text>
+
+      <rect x="844" y="194" width="164" height="60" rx="10" class="bx bx-fog"/>
+      <text x="926" y="219" class="bt">Piper TTS</text>
+      <text x="926" y="237" class="bs">text → speech · local</text>
+
+      <!-- ===== EDGE ===== -->
+      <rect x="20" y="312" width="1008" height="344" rx="14" class="b-edge"/>
+      <path d="M34,312 H64 V656 H34 A14,14 0 0 1 20,642 V326 A14,14 0 0 1 34,312 Z" class="tab-edge"/>
+      <text class="tab-t" transform="translate(42,484) rotate(-90)" text-anchor="middle" dominant-baseline="central">EDGE · ESP32-S3</text>
+
+      <rect x="84" y="330" width="924" height="32" rx="8" class="strip"/>
+      <text x="546" y="350.5" text-anchor="middle"><tspan class="st-b">Wi-Fi · Network Client</tspan><tspan class="st-m" dx="10">WebSocket · HTTPS · HTTP stream</tspan></text>
+
+      <!-- Row A -->
+      <rect x="84" y="398" width="164" height="60" rx="10" class="bx bx-edge"/>
+      <text x="166" y="419" class="bt">Audio Front-End</text>
+      <text x="166" y="436" class="bs">noise suppression</text>
+      <text x="166" y="450" class="bs">VAD · end of speech</text>
+
+      <rect x="274" y="398" width="164" height="60" rx="10" class="bx bx-edge"/>
+      <text x="356" y="419" class="bt">WakeNet</text>
+      <text x="356" y="436" class="bs">wake word: “Jarvis”</text>
+      <text x="356" y="450" class="bs">always on</text>
+
+      <rect x="464" y="398" width="164" height="60" rx="10" class="bx bx-edge"/>
+      <text x="546" y="419" class="bt">MultiNet</text>
+      <text x="546" y="436" class="bs">offline commands</text>
+      <text x="546" y="450" class="bs">+ speech buffer</text>
+
+      <rect x="654" y="398" width="164" height="60" rx="10" class="bx bx-edge"/>
+      <text x="736" y="419" class="bt">Intent Router</text>
+      <text x="736" y="436" class="bs">match → act locally</text>
+      <text x="736" y="450" class="bs">no match → escalate</text>
+
+      <!-- Row B -->
+      <text x="200" y="514" class="why"><tspan class="why-b">Why edge:</tspan> instant · offline · private</text>
+      <text x="200" y="531" class="why">nothing leaves the board before the wake word</text>
+      <text x="200" y="548" class="why">I2S0 + I2S1 run together → it can listen while speaking</text>
+
+      <rect x="654" y="494" width="164" height="60" rx="10" class="bx bx-edge"/>
+      <text x="736" y="515" class="bt">Local Actions</text>
+      <text x="736" y="532" class="bs">GPIO · volume · player</text>
+      <text x="736" y="546" class="bs">chime · offline prompt</text>
+
+      <rect x="844" y="494" width="164" height="60" rx="10" class="bx bx-edge"/>
+      <text x="926" y="515" class="bt">Audio Player</text>
+      <text x="926" y="532" class="bs">decode · mix</text>
+      <text x="926" y="546" class="bs">ducks music for voice</text>
+
+      <!-- Hardware -->
+      <rect x="84" y="594" width="164" height="46" rx="8" class="bx-hw"/>
+      <text x="166" y="621" class="hwt">INMP441 mic</text>
+      <rect x="654" y="594" width="164" height="46" rx="8" class="bx-hw"/>
+      <text x="736" y="621" class="hwt">Relays · Sensors</text>
+      <rect x="844" y="594" width="164" height="46" rx="8" class="bx-hw"/>
+      <text x="926" y="621" class="hwt">MAX98357A → speaker</text>
+
+      <!-- ===== CONNECTIONS ===== -->
+      <!-- cloud ↔ edge, direct -->
+      <path d="M166,108 V328" class="ln" marker-start="url(#ah)" marker-end="url(#ah)"/>
+      <text x="172" y="156" class="lb">HTTPS · text</text>
+      <path d="M356,108 V328" class="ln" marker-end="url(#ah)"/>
+      <text x="362" y="156" class="lb">HTTP audio stream</text>
+
+      <!-- cloud ↔ fog -->
+      <path d="M712,108 V192" class="ln" marker-start="url(#ah)" marker-end="url(#ah)"/>
+      <text x="706" y="156" class="lb" text-anchor="end">HTTPS · OpenAI API</text>
+      <path d="M790,192 V152 H926 V108" class="ln" marker-start="url(#ah)" marker-end="url(#ah)"/>
+
+      <!-- inside fog -->
+      <path d="M630,224 H652" class="ln" marker-start="url(#ah)" marker-end="url(#ah)"/>
+      <path d="M820,224 H842" class="ln" marker-start="url(#ah)" marker-end="url(#ah)"/>
+
+      <!-- fog ↔ edge -->
+      <path d="M736,256 V328" class="ln" marker-start="url(#ah)" marker-end="url(#ah)"/>
+      <text x="742" y="302" class="lb">WebSocket · speech ↑ · reply audio ↓</text>
+
+      <!-- network client ↔ firmware -->
+      <path d="M736,364 V396" class="ln" marker-start="url(#ah)" marker-end="url(#ah)"/>
+      <text x="742" y="384" class="lb">escalate · Telegram text</text>
+      <path d="M926,364 V492" class="ln" marker-end="url(#ah)"/>
+      <text x="918" y="440" class="lb" text-anchor="end">TTS + music</text>
+
+      <!-- speech chain -->
+      <path d="M250,428 H272" class="ln" marker-end="url(#ah)"/>
+      <path d="M440,428 H462" class="ln" marker-end="url(#ah)"/>
+      <path d="M630,428 H652" class="ln" marker-end="url(#ah)"/>
+      <path d="M736,460 V492" class="ln" marker-end="url(#ah)"/>
+      <text x="742" y="481" class="lb">matched</text>
+      <path d="M820,524 H842" class="ln" marker-end="url(#ah)"/>
+
+      <!-- hardware links -->
+      <path d="M166,592 V460" class="ln" marker-end="url(#ah)"/>
+      <text x="172" y="481" class="lb">I2S0 · RX</text>
+      <path d="M736,556 V592" class="ln" marker-start="url(#ah)" marker-end="url(#ah)"/>
+      <text x="742" y="578" class="lb">GPIO</text>
+      <path d="M926,556 V592" class="ln" marker-end="url(#ah)"/>
+      <text x="932" y="578" class="lb">I2S1 · TX</text>
+    </svg>
+
+    <div class="legend">
+      <span><i class="sw" style="--c:var(--edge);--s:var(--edge-soft)"></i>Edge · runs on the S3</span>
+      <span><i class="sw" style="--c:var(--fog);--s:var(--fog-soft)"></i>Fog · laptop</span>
+      <span><i class="sw" style="--c:var(--cloud);--s:var(--cloud-soft)"></i>Cloud</span>
+      <span><i class="sw hw" style="--c:var(--hw-bd);--s:var(--hw)"></i>Hardware</span>
+      <span>→ one-way &nbsp;·&nbsp; ↔ two-way</span>
+    </div>
+  </div>
+  <p class="caption">Phase 1 is shown. In Phase 2 the fog tier is removed and the S3 calls the cloud directly (see section 05).</p>
+
+  <!-- 2. STATES -->
+  <h2><span class="n">02</span>When does what run</h2>
+  <p class="sub">The S3 is always in one of these states. Only the THINKING branch sends anything off the board.</p>
+
+  <div class="card diagram">
+    <svg class="sv states" viewBox="0 0 1012 284" role="img" aria-labelledby="stTitle">
+      <title id="stTitle">Device state flow</title>
+      <defs>
+        <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" class="ah"/>
+        </marker>
+      </defs>
+
+      <rect x="16" y="106" width="190" height="62" rx="12" class="bx bx-edge"/>
+      <text x="111" y="130" class="bt">IDLE</text>
+      <text x="111" y="147" class="bs">listens for the wake word</text>
+      <text x="111" y="161" class="bs">music may be playing</text>
+
+      <rect x="276" y="106" width="190" height="62" rx="12" class="bx bx-edge"/>
+      <text x="371" y="130" class="bt">AWAKE</text>
+      <text x="371" y="147" class="bs">chime · music ducked</text>
+      <text x="371" y="161" class="bs">MultiNet + recording</text>
+
+      <rect x="546" y="30" width="190" height="62" rx="12" class="bx bx-edge"/>
+      <text x="641" y="54" class="bt">LOCAL ACTION</text>
+      <text x="641" y="71" class="bs">if a command matched</text>
+      <text x="641" y="85" class="bs">act + chime · ~0.5 s</text>
+
+      <rect x="546" y="182" width="190" height="62" rx="12" class="bx bx-fog"/>
+      <text x="641" y="206" class="bt">THINKING</text>
+      <text x="641" y="223" class="bs">if nothing matched</text>
+      <text x="641" y="237" class="bs">speech → laptop → Groq</text>
+
+      <rect x="806" y="182" width="190" height="62" rx="12" class="bx bx-edge"/>
+      <text x="901" y="206" class="bt">SPEAKING</text>
+      <text x="901" y="223" class="bs">reply streams + plays</text>
+      <text x="901" y="237" class="bs">wake word stays armed</text>
+
+      <path d="M208,137 H274" class="ln" marker-end="url(#ah2)"/>
+      <text x="241" y="129" class="lb" text-anchor="middle">wake word</text>
+
+      <path d="M468,126 H506 V61 H544" class="ln" marker-end="url(#ah2)"/>
+      <path d="M468,148 H506 V213 H544" class="ln" marker-end="url(#ah2)"/>
+
+      <path d="M738,213 H804" class="ln" marker-end="url(#ah2)"/>
+      <text x="771" y="205" class="lb" text-anchor="middle">reply</text>
+
+      <path d="M641,28 V14 H111 V104" class="ln" marker-end="url(#ah2)"/>
+      <text x="330" y="32" class="lb" text-anchor="middle">done → back to idle</text>
+
+      <path d="M901,246 V268 H111 V170" class="ln" marker-end="url(#ah2)"/>
+      <text x="330" y="262" class="lb" text-anchor="middle">reply done → music un-ducks</text>
+
+      <path d="M641,246 V268" class="ln ln-d"/>
+      <text x="650" y="262" class="lb">no network → offline prompt</text>
+    </svg>
+  </div>
+
+  <!-- 3. PIPELINES -->
+  <h2><span class="n">03</span>Pipelines — how, when, why</h2>
+  <p class="sub">Seven paths through the same hardware. Pipelines 1, 2 and 7 never leave the S3.</p>
+
+  <div class="pipes">
+
+    <article class="card pipe">
+      <header><span class="num">1</span><h3>Always listening</h3>
+        <span class="tags"><span class="tag edge">Edge</span></span><span class="lat">&lt; 0.5 s</span></header>
+      <dl>
+        <dt>When</dt><dd>Always, even while music is playing.</dd>
+        <dt>How</dt><dd class="flow"><span class="chip hw">INMP441</span><i>→</i><span class="chip edge">Audio Front-End</span><i>→</i><span class="chip edge">WakeNet “Jarvis”</span><i>→</i><span class="chip edge">chime + duck music</span></dd>
+        <dt>Why</dt><dd>Nothing leaves the board until the wake word, so it's private, there's no 24/7 upload (unlike BlueDot), and it works offline.</dd>
+      </dl>
+    </article>
+
+    <article class="card pipe">
+      <header><span class="num">2</span><h3>Local command</h3>
+        <span class="tags"><span class="tag edge">Edge</span></span><span class="lat">&lt; 0.5 s</span></header>
+      <dl>
+        <dt>When</dt><dd>What you say is on your MultiNet list: “volume up”, “pause”, “next”, “light on”.</dd>
+        <dt>How</dt><dd class="flow"><span class="chip edge">MultiNet match</span><i>→</i><span class="chip edge">Intent Router</span><i>→</i><span class="chip edge">Local Actions</span><i>→</i><span class="chip hw">GPIO / player</span><i>→</i><span class="chip edge">chime</span></dd>
+        <dt>Why</dt><dd>Instant, free, works with Wi-Fi down. Limit: fixed English phrases only (up to 300).</dd>
+      </dl>
+    </article>
+
+    <article class="card pipe">
+      <header><span class="num">3</span><h3>Ask anything</h3>
+        <span class="tags"><span class="tag edge">Edge</span><span class="tag fog">Fog</span><span class="tag cloud">Cloud</span></span><span class="lat">~2–4 s</span></header>
+      <dl>
+        <dt>When</dt><dd>Nothing on the list matched: open questions, chat.</dd>
+        <dt>How</dt><dd class="flow"><span class="chip edge">buffered speech</span><i>→</i><span class="chip plain">WebSocket</span><i>→</i><span class="chip fog">faster-whisper</span><i>→</i><span class="chip fog">Orchestrator</span><i>→</i><span class="chip cloud">Groq LLM</span><i>→</i><span class="chip fog">Piper TTS</span><i>→</i><span class="chip edge">Audio Player</span></dd>
+        <dt>Why</dt><dd>Open-ended language needs a real LLM. Your TinyStories test showed the S3 can't do it.</dd>
+      </dl>
+      <div class="note"><b>Tip:</b> send the reply to Piper sentence by sentence so it starts talking before the full answer arrives.</div>
+    </article>
+
+    <article class="card pipe">
+      <header><span class="num">4</span><h3>Web search</h3>
+        <span class="tags"><span class="tag edge">Edge</span><span class="tag fog">Fog</span><span class="tag cloud">Cloud</span></span><span class="lat">~3–5 s</span></header>
+      <dl>
+        <dt>When</dt><dd>The question needs live info: news, scores, prices, weather.</dd>
+        <dt>How</dt><dd class="flow"><span class="chip plain">same as 3</span><i>→</i><span class="chip cloud">Groq asks for a search</span><i>→</i><span class="chip fog">Orchestrator</span><i>→</i><span class="chip cloud">Web Search</span><i>→</i><span class="chip cloud">one-line summary</span><i>→</i><span class="chip fog">Piper TTS</span><i>→</i><span class="chip edge">Audio Player</span></dd>
+        <dt>Why</dt><dd>The LLM's knowledge is frozen. Search runs upstream; the speaker only narrates the answer.</dd>
+      </dl>
+    </article>
+
+    <article class="card pipe">
+      <header><span class="num">5</span><h3>Play music</h3>
+        <span class="tags"><span class="tag edge">Edge</span><span class="tag fog">Fog</span><span class="tag cloud">Cloud</span></span><span class="lat">~3–5 s</span></header>
+      <dl>
+        <dt>When</dt><dd>“Play <em>song / artist / station</em>”.</dd>
+        <dt>How</dt><dd class="flow"><span class="chip edge">buffered speech</span><i>→</i><span class="chip fog">faster-whisper</span><i>→</i><span class="chip cloud">Groq picks “play music”</span><i>→</i><span class="chip fog">Orchestrator finds stream</span><i>→</i><span class="chip plain">URL to S3</span><i>→</i><span class="chip edge">Audio Player streams</span></dd>
+        <dt>Why</dt><dd>Song names are open vocabulary, which MultiNet can't handle. Playback still runs on the edge, so pause, volume and next stay instant (pipeline 2).</dd>
+      </dl>
+      <div class="note"><b>Sources:</b> your MP3s on the laptop, or internet radio. The S3 has no Bluetooth Classic, so there's no A2DP; music comes over Wi-Fi.</div>
+    </article>
+
+    <article class="card pipe">
+      <header><span class="num">6</span><h3>Telegram remote</h3>
+        <span class="tags"><span class="tag cloud">Cloud</span><span class="tag edge">Edge</span></span><span class="lat">~1 s</span></header>
+      <dl>
+        <dt>When</dt><dd>You message the bot from anywhere.</dd>
+        <dt>How</dt><dd class="flow"><span class="chip cloud">Telegram Bot API</span><i>→</i><span class="chip plain">S3 long-poll</span><i>→</i><span class="chip edge">Intent Router</span><i>→</i><span class="chip edge">Local Actions</span><i>→</i><span class="chip plain">reply “Light on ✓”</span></dd>
+        <dt>Why</dt><dd>One router for voice and text. Switching things stays on the edge.</dd>
+      </dl>
+      <div class="note"><b>Free text</b> (not a known command) goes Router → Orchestrator → Groq and comes back as a text reply, with no speech involved.</div>
+    </article>
+
+    <article class="card pipe">
+      <header><span class="num">7</span><h3>Offline fallback</h3>
+        <span class="tags"><span class="tag edge">Edge</span></span><span class="lat">instant</span></header>
+      <dl>
+        <dt>When</dt><dd>Wi-Fi, the laptop or Groq can't be reached.</dd>
+        <dt>How</dt><dd class="flow"><span class="chip edge">escalation times out</span><i>→</i><span class="chip edge">Intent Router</span><i>→</i><span class="chip edge">offline prompt (SAM / stored clip)</span><i>→</i><span class="chip edge">local commands keep working</span></dd>
+        <dt>Why</dt><dd>Graceful degradation. It's still a useful speaker, not a dead one.</dd>
+      </dl>
+    </article>
+
+  </div>
+
+  <!-- 4. CONNECTIONS -->
+  <h2><span class="n">04</span>Connections setup</h2>
+  <p class="sub">Amp pins are from your verified S3 build. Mic pins are the last ones you tested, so confirm them before soldering.</p>
+
+  <div class="grid2">
+    <div class="card tbl">
+      <h3><span class="tag edge">I2S0</span>INMP441 mic</h3>
+      <table>
+        <thead><tr><th>Mic pin</th><th>ESP32-S3</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td class="pin">VDD</td><td class="pin">3V3</td><td class="dim">3.3 V only</td></tr>
+          <tr><td class="pin">GND</td><td class="pin">GND</td><td class="dim">common ground</td></tr>
+          <tr><td class="pin">SCK</td><td class="pin">GPIO 5</td><td class="chk">verify</td></tr>
+          <tr><td class="pin">WS</td><td class="pin">GPIO 4</td><td class="chk">verify</td></tr>
+          <tr><td class="pin">SD</td><td class="pin">GPIO 6</td><td class="chk">verify</td></tr>
+          <tr><td class="pin">L/R</td><td class="pin">GND</td><td class="dim">left channel</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card tbl">
+      <h3><span class="tag edge">I2S1</span>MAX98357A amp + speaker</h3>
+      <table>
+        <thead><tr><th>Amp pin</th><th>ESP32-S3</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td class="pin">VIN</td><td class="pin">5V</td><td class="dim">louder than 3V3</td></tr>
+          <tr><td class="pin">GND</td><td class="pin">GND</td><td class="dim">common ground</td></tr>
+          <tr><td class="pin">BCLK</td><td class="pin">GPIO 15</td><td class="ok">verified</td></tr>
+          <tr><td class="pin">LRC</td><td class="pin">GPIO 16</td><td class="ok">verified</td></tr>
+          <tr><td class="pin">DIN</td><td class="pin">GPIO 17</td><td class="ok">verified</td></tr>
+          <tr><td class="pin">SD</td><td class="pin">GPIO 18</td><td class="dim">amp on / mute</td></tr>
+          <tr><td class="pin">GAIN</td><td class="pin">GND / open</td><td class="dim">12 dB / 9 dB</td></tr>
+          <tr><td class="pin">SPK±</td><td class="pin">speaker</td><td class="dim">4 Ω (2 × 8 Ω parallel), never to GND</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card tbl mt">
+    <h3>Network links</h3>
+    <table>
+      <thead><tr><th>Link</th><th>Protocol</th><th>Carries</th><th>Pipelines</th></tr></thead>
+      <tbody>
+        <tr><td><b>S3 ↔ laptop</b></td><td>WebSocket on your Wi-Fi; find the laptop by mDNS name, not a hardcoded IP</td><td>speech ↑ (16 kHz mono) · reply audio + JSON commands ↓</td><td class="pin">3 4 5</td></tr>
+        <tr><td><b>Laptop ↔ Groq</b></td><td>HTTPS, OpenAI-compatible API</td><td>text, tool calls</td><td class="pin">3 4 5</td></tr>
+        <tr><td><b>Laptop ↔ search</b></td><td>HTTPS search API</td><td>query, results</td><td class="pin">4</td></tr>
+        <tr><td><b>S3 ↔ Telegram</b></td><td>HTTPS long-poll</td><td>commands, replies</td><td class="pin">6</td></tr>
+        <tr><td><b>S3 ← music</b></td><td>HTTP(S) MP3 stream</td><td>music audio</td><td class="pin">5</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card mt">
+    <ul class="notes">
+      <li><b>Both I2S ports run at once</b> (mic on I2S0, amp on I2S1), so it can hear you while it talks: barge-in now, echo cancellation later. BlueDot had to stop the mic to play.</li>
+      <li><b>Split the cores:</b> speech AI on one, Wi-Fi + playback on the other.</li>
+      <li><b>Flash:</b> add a model partition for the ESP-SR models and grow the app partition. Your current 1 MB factory app is too small; 16 MB has room.</li>
+      <li><b>PSRAM</b> (8 MB) holds the models, the speech buffer and the stream buffers.</li>
+      <li><b>INMP441</b> sends 24-bit audio in 32-bit slots. Convert to 16-bit, 16 kHz before ESP-SR.</li>
+      <li><b>Spare GPIOs</b> for relays and sensors: avoid 0, 3, 45, 46 (strapping), 19–20 (USB), 26–37 (flash/PSRAM) and 43–44 (UART). Use a relay module, never a bare coil.</li>
+      <li><b>No Bluetooth Classic on the S3</b>, so no A2DP. Upside: the Wi-Fi/BT packet-loss problem from the WROOM build disappears.</li>
+      <li><b>Power:</b> one USB-C 5 V supply, common ground, amp on 5 V.</li>
+    </ul>
+  </div>
+
+  <!-- 5. PHASES -->
+  <h2><span class="n">05</span>Phase 1 → Phase 2</h2>
+  <p class="sub">Start with the laptop as fog because it's easier to debug and free. Then move the calls onto the S3 so the speaker is fully portable.</p>
+
+  <div class="card tbl">
+    <table class="phase">
+      <thead><tr><th></th><th>Phase 1 · now</th><th>Phase 2 · portable</th></tr></thead>
+      <tbody>
+        <tr><td>Wake word + commands</td><td>Edge (ESP-SR)</td><td>Edge (ESP-SR)</td></tr>
+        <tr><td>Speech → text</td><td>faster-whisper on laptop</td><td>Groq Whisper API, called by the S3</td></tr>
+        <tr><td>LLM + tools</td><td>Groq, called by the laptop</td><td>Groq, called by the S3</td></tr>
+        <tr><td>Text → speech</td><td>Piper on laptop</td><td>a cloud TTS API</td></tr>
+        <tr><td>Music</td><td>laptop MP3s + internet radio</td><td>internet radio / stream URLs</td></tr>
+        <tr><td>API keys live on</td><td>laptop</td><td>S3 flash</td></tr>
+        <tr><td>Needs the laptop on</td><td>Yes</td><td>No</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 6. BUILD ORDER -->
+  <h2><span class="n">06</span>Build order</h2>
+  <p class="sub">Each step works on its own before the next one starts.</p>
+
+  <ol class="steps">
+    <li class="card"><span class="txt"><b>Mic on the S3</b>: record, then play it back through the amp (loopback test).</span><span class="tags"><span class="tag edge">Edge</span></span></li>
+    <li class="card"><span class="txt"><b>Wake word</b>: esp-skainet example, “Jarvis” model, chime on detect.</span><span class="tags"><span class="tag edge">Edge</span></span></li>
+    <li class="card"><span class="txt"><b>MultiNet → Local Actions</b>: volume, pause, one relay.</span><span class="tags"><span class="tag edge">Edge</span></span></li>
+    <li class="card"><span class="txt"><b>Fog link</b>: WebSocket to the laptop; port your faster-whisper → Groq → Piper relay.</span><span class="tags"><span class="tag fog">Fog</span><span class="tag cloud">Cloud</span></span></li>
+    <li class="card"><span class="txt"><b>Music</b>: stream player, “play music” tool, ducking.</span><span class="tags"><span class="tag edge">Edge</span><span class="tag fog">Fog</span></span></li>
+    <li class="card"><span class="txt"><b>Web search tool + Telegram bot.</b></span><span class="tags"><span class="tag cloud">Cloud</span><span class="tag edge">Edge</span></span></li>
+    <li class="card"><span class="txt"><b>Phase 2</b>: move the speech-to-text, LLM and text-to-speech calls onto the S3, and drop the laptop.</span><span class="tags"><span class="tag edge">Edge</span><span class="tag cloud">Cloud</span></span></li>
+  </ol>
+
+  <footer>Latency figures are rough targets, not measurements. “Jarvis” is a stock ESP-SR wake word model trained on synthetic speech, so test it in your room before relying on it.</footer>
+</div>
+</body>
+</html>
