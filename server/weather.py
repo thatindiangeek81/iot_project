@@ -1,18 +1,23 @@
 """Weather for the get_weather tool, from Open-Meteo (free, no key).
 
 Much faster and more exact than a web search: one lookup for the place (cached)
-and one for the forecast, usually well under a second.
+and one for the forecast, usually well under a second. The answer is kept for
+WEATHER_CACHE_S seconds, and the home city's is refreshed in the background, so
+asking "what's the weather" is normally instant.
 
     python weather.py Gandhinagar      check it works from this laptop
 """
 
 from __future__ import annotations
 
+import copy
 import threading
+import time
 
 import requests
 
 import config
+from httpsession import new_session
 
 GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -27,9 +32,22 @@ _CODES = {
     95: "thunderstorms", 96: "thunderstorms with hail", 99: "thunderstorms with hail",
 }
 
-_session = requests.Session()
+_session = new_session()
 _places: dict[str, dict] = {}
+_cache: dict[str, tuple[float, dict]] = {}
 _lock = threading.Lock()
+
+
+def _get(url: str, params: dict) -> requests.Response:
+    """GET with a short timeout. A connection that has gone dead (the line was quiet for a while)
+    is swapped for a fresh one and the request tried once more, instead of waiting for it."""
+    global _session
+    timeout = (3.05, config.WEATHER_TIMEOUT)
+    try:
+        return _session.get(url, params=params, timeout=timeout)
+    except (requests.Timeout, requests.ConnectionError):
+        _session = new_session()
+        return _session.get(url, params=params, timeout=timeout)
 
 
 def _place(name: str) -> dict:
@@ -37,8 +55,7 @@ def _place(name: str) -> dict:
     with _lock:
         if key in _places:
             return _places[key]
-    r = _session.get(GEO_URL, params={"name": name.split(",")[0].strip(), "count": 5, "language": "en",
-                                      "format": "json"}, timeout=config.SEARCH_TIMEOUT)
+    r = _get(GEO_URL, {"name": name.split(",")[0].strip(), "count": 5, "language": "en", "format": "json"})
     r.raise_for_status()
     results = (r.json() or {}).get("results") or []
     if not results:
@@ -54,10 +71,9 @@ def _place(name: str) -> dict:
     return best
 
 
-def get_weather(place: str) -> dict:
-    """Now, today and tomorrow for `place`."""
+def _fetch(place: str) -> dict:
     p = _place(place)
-    r = _session.get(FORECAST_URL, timeout=config.SEARCH_TIMEOUT, params={
+    r = _get(FORECAST_URL, {
         "latitude": p["latitude"], "longitude": p["longitude"], "timezone": "auto", "forecast_days": 3,
         "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,precipitation",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset",
@@ -85,6 +101,60 @@ def get_weather(place: str) -> dict:
         "tomorrow": daily(1),
         "source": "Open-Meteo",
     }
+
+
+def _cached(key: str) -> dict | None:
+    with _lock:
+        item = _cache.get(key)
+    if item and time.time() - item[0] < config.WEATHER_CACHE_S:
+        return copy.deepcopy(item[1])
+    return None
+
+
+def is_cached(place: str) -> bool:
+    """True when asking for this place's weather needs no trip to the internet."""
+    return config.WEATHER_CACHE_S > 0 and _cached(place.strip().lower()) is not None
+
+
+def get_weather(place: str, force: bool = False) -> dict:
+    """Now, today and tomorrow for `place`. A lookup is reused for WEATHER_CACHE_S seconds;
+    force=True always asks Open-Meteo."""
+    key = place.strip().lower()
+    if not force and config.WEATHER_CACHE_S > 0:
+        hit = _cached(key)
+        if hit is not None:
+            return hit
+    out = _fetch(place)
+    if config.WEATHER_CACHE_S > 0:
+        with _lock:
+            _cache[key] = (time.time(), out)
+    return copy.deepcopy(out)
+
+
+def start_prefetch(get_place, interval: float | None = None) -> threading.Event | None:
+    """Keep the weather for get_place() fresh in the background (it runs every 80% of
+    WEATHER_CACHE_S). Returns an Event that stops it, or None if it is switched off."""
+    if config.WEATHER_CACHE_S <= 0 or not config.WEATHER_PREFETCH:
+        return None
+    stop = threading.Event()
+    wait = interval if interval is not None else max(60.0, config.WEATHER_CACHE_S * 0.8)
+
+    def loop() -> None:
+        warned = False
+        while not stop.is_set():
+            try:
+                place = (get_place() or "").strip()
+                if place:
+                    get_weather(place, force=True)
+                    warned = False
+            except Exception as exc:       # offline, or the city isn't known: try again next time
+                if not warned:
+                    print(f"[weather] background refresh failed: {exc}")
+                    warned = True
+            stop.wait(wait)
+
+    threading.Thread(target=loop, name="weather-prefetch", daemon=True).start()
+    return stop
 
 
 if __name__ == "__main__":

@@ -144,6 +144,11 @@ MAX_INPUT_CHARS = 500
 # No first word from Gemini after this many seconds: ask again on a fresh connection and use
 # whichever answers first (0 = never). This is what turns a 15 s stall into a 4 s one.
 GEMINI_HEDGE_S = _get_float("GEMINI_HEDGE_S", 3.0)
+# Reuse a weather lookup for this many seconds (0 = always ask), and keep your home city's
+# weather fresh in the background so "what's the weather" is instant
+WEATHER_CACHE_S = _get_int("WEATHER_CACHE_S", 600)
+WEATHER_PREFETCH = _get_bool("WEATHER_PREFETCH", True)
+WEATHER_TIMEOUT = _get_float("WEATHER_TIMEOUT", 4.0)        # seconds to wait for Open-Meteo
 # Ping Google when the line has been quiet this long, so the connection never goes stale (0 = off)
 GEMINI_KEEPALIVE_S = _get_int("GEMINI_KEEPALIVE_S", 40)
 
