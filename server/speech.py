@@ -158,6 +158,10 @@ class SpeechSession:
         with self.cv:
             return self._head() is None
 
+    @property
+    def aborted(self) -> bool:
+        return self._aborted
+
     def pieces(self):
         """Yield (tag, audio bytes, first) for the whole reply in order, waiting for what isn't made yet;
         `first` is True for the first piece of each sentence. Ends after close() once all of it has been
