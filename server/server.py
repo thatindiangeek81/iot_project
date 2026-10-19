@@ -512,15 +512,22 @@ class Handler(BaseHTTPRequestHandler):
                   f"{'' if typed else f'Whisper {stt_ms} ms | '}Gemini {result['ms']} ms {_tools(result)}| "
                   f"{reply.voice.name} {reply.tts_ms} ms (streamed)\nfriday> {result['reply']}{_action(result)}")
             _save_reply(bytes(reply.audio), reply.voice.fmt)
-        a.after_turn(heard, result)
+        self._after(heard, result)
         return True
+
+    def _after(self, heard: str, result: dict) -> None:
+        """Log the exchange and learn from it, unless the request says it's a test (X-No-Log: 1):
+        the benchmark asks dozens of questions and shouldn't fill the history and the memory with them."""
+        if (self.headers.get("X-No-Log") or "").strip() == "1":
+            return
+        self.assistant.after_turn(heard, result)
 
     def _chat(self, text: str) -> None:
         result = self.assistant.think(text, self.music_state)
         self._json({"reply": result["reply"], "ms": result["ms"], "tools": [t["tool"] for t in result["tools"]],
                     "action": result.get("actions") or {}})
         print(f"[turn] typed \"{text}\" -> {result['reply']}")
-        self.assistant.after_turn(text, result)
+        self._after(text, result)
 
     def _say(self, text: str) -> None:
         if self._wants_stream() and self._turn_streamed(text, 0, typed=True):
@@ -533,7 +540,7 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[turn] typed \"{text}\" | Gemini {result['ms']} ms {_tools(result)}| {backend.name} {tts_ms} ms\n"
               f"friday> {result['reply']}{_action(result)}")
         _save_reply(audio, backend.fmt)
-        self.assistant.after_turn(text, result)
+        self._after(text, result)
 
     def _ask(self, body: bytes, debug: bool) -> None:
         a = self.assistant
@@ -561,7 +568,7 @@ class Handler(BaseHTTPRequestHandler):
             _save_reply(audio, backend.fmt)
             print(f"[turn] heard \"{heard or '(nothing clear)'}\" | Whisper {stt_ms} ms | Gemini {result['ms']} ms "
                   f"{_tools(result)}| {backend.name} {tts_ms} ms\nfriday> {result['reply']}{_action(result)}")
-        a.after_turn(heard, result)
+        self._after(heard, result)
 
 
 LATENCY_COLUMNS = ("time", "kind", "first_audio_ms", "stt_ms", "prompt_ms", "gemini_ms", "tool_ms", "tts_ms", "quick",

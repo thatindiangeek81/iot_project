@@ -218,6 +218,22 @@ class Streamed(Base):
                                                    "And the rest of it, written later."))
 
 
+class NoLog(Base):
+    def test_a_test_request_is_not_logged_or_learned_from(self):
+        fake, _ = script([("text", "It is sunny today."), END], [("text", "Still sunny."), END])
+        with mock.patch.object(gemini, "chat_stream", fake):
+            self.assertEqual(self.say("first", {"X-No-Log": "1"})[0], 200)
+            self.assertEqual(self.say("second")[0], 200)
+        self.assertTrue(wait_until(lambda: self.assistant.logged))
+        self.assertEqual(self.assistant.logged, [("second", "Still sunny.")])      # only the one that wasn't a test
+
+    def test_the_old_path_honours_it_too(self):
+        self.assertEqual(self.say("first", {"X-Stream": "0", "X-No-Log": "1"})[0], 200)
+        self.assertEqual(self.say("second", {"X-Stream": "0"})[0], 200)
+        self.assertTrue(wait_until(lambda: self.assistant.logged))
+        self.assertEqual(self.assistant.logged, [("second", "Legacy answer.")])
+
+
 class Switching(Base):
     def test_x_stream_zero_uses_the_normal_path(self):
         fake, calls = script([("text", "Never asked."), END])

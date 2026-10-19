@@ -20,14 +20,22 @@ class FakeMemory:
     def setting(self, key, default=None):
         return default
 
+    def count_facts(self):
+        return 0
+
     def save_fact(self, content, category=None, source="explicit"):
         self.saved.append(content)
         return "saved"
 
 
 class FakeJukebox:
+    ffmpeg = None
+
     def __init__(self):
         self.played = []
+
+    def count(self):
+        return 3
 
     def observe(self, header):
         return header is not None
@@ -85,6 +93,22 @@ def script(*rounds):
                     yield event
             finally:
                 record["closed"] = True
+        return gen()
+
+    return fake, calls
+
+
+def always(*events):
+    """Like script(), but every round plays the same events (for runs that ask many questions)."""
+    calls = []
+
+    def fake(messages, tools=None, model=None, max_tokens=1024, reasoning=None, hedge_s=None, info=None):
+        calls.append({"messages": copy.deepcopy(messages), "tools": tools})
+        if info is not None:
+            info.update(ttft_ms=120, hedged=False)
+
+        def gen():
+            yield from events
         return gen()
 
     return fake, calls
