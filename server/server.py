@@ -192,6 +192,8 @@ class _HttpTransport:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"          # keep-alive: the S3 reuses one connection
     server_version = "friday-local/1.0"
+    disable_nagle_algorithm = True         # TCP_NODELAY: a small write (the header, the end of a sentence) goes out
+                                           # now, not after the S3 has got round to acknowledging the one before
     assistant: Assistant = None            # set in main()
 
     def log_message(self, fmt, *args) -> None:   # quiet; turns print their own summary
