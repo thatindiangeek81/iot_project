@@ -141,6 +141,9 @@ MAX_INPUT_CHARS = 500
 
 # --- Speed ------------------------------------------------------------
 # What each one does is explained under "Making replies faster" in the README.
+# No first word from Gemini after this many seconds: ask again on a fresh connection and use
+# whichever answers first (0 = never). This is what turns a 15 s stall into a 4 s one.
+GEMINI_HEDGE_S = _get_float("GEMINI_HEDGE_S", 3.0)
 # Ping Google when the line has been quiet this long, so the connection never goes stale (0 = off)
 GEMINI_KEEPALIVE_S = _get_int("GEMINI_KEEPALIVE_S", 40)
 

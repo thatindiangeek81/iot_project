@@ -1,6 +1,7 @@
 """Every call to Google's Gemini API lives here.
 
   chat()    OpenAI-compatible chat endpoint, with function tools (same endpoint the Worker uses)
+  chat_stream()  the same, streamed: the first words arrive while the rest is still being written
   search()  native generateContent with the built-in Google Search tool
   embed()   native embedContent, for memory similarity
   warm()    keep the connection to Google open and alive (see keepalive_start)
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import queue
 import re
 import threading
 import time
@@ -77,11 +79,9 @@ def _native_headers() -> dict:
 _reasoning_ok = True   # set False if this model refuses reasoning_effort, so we stop sending it
 
 
-def chat(messages: list[dict], tools: list[dict] | None = None, model: str | None = None,
-         max_tokens: int = 1024, json_mode: bool = False, reasoning: str | None = None) -> dict:
-    """One chat completion. Returns the assistant message dict (content and/or tool_calls).
-    reasoning: low | medium | high, how long Gemini thinks first (less = faster)."""
-    global _reasoning_ok
+def _chat_request(messages: list[dict], tools: list[dict] | None, model: str | None, max_tokens: int,
+                  json_mode: bool, reasoning: str | None) -> tuple[str, dict, dict]:
+    """(url, headers, body) of one chat completion."""
     body: dict = {
         "model": model or config.GEMINI_MODEL,
         "messages": messages,
@@ -93,8 +93,16 @@ def chat(messages: list[dict], tools: list[dict] | None = None, model: str | Non
         body["response_format"] = {"type": "json_object"}
     if reasoning and _reasoning_ok:
         body["reasoning_effort"] = reasoning
-    url = f"{config.GEMINI_BASE}/openai/chat/completions"
-    headers = {"Authorization": f"Bearer {config.GEMINI_API_KEY}"}
+    return (f"{config.GEMINI_BASE}/openai/chat/completions",
+            {"Authorization": f"Bearer {config.GEMINI_API_KEY}"}, body)
+
+
+def chat(messages: list[dict], tools: list[dict] | None = None, model: str | None = None,
+         max_tokens: int = 1024, json_mode: bool = False, reasoning: str | None = None) -> dict:
+    """One chat completion. Returns the assistant message dict (content and/or tool_calls).
+    reasoning: low | medium | high, how long Gemini thinks first (less = faster)."""
+    global _reasoning_ok
+    url, headers, body = _chat_request(messages, tools, model, max_tokens, json_mode, reasoning)
     try:
         data = _post(url, body, headers)
     except GeminiError as exc:
@@ -119,6 +127,315 @@ def chat_json(prompt: str, model: str | None = None) -> dict | list | None:
         return json.loads(text)
     except ValueError:
         return None
+
+
+# ---------------------------------------------------------------- streaming chat
+
+_DONE = object()
+
+
+def _sse_data(line: bytes):
+    """One line of a server-sent-events stream -> a parsed JSON object, _DONE, or None."""
+    line = line.strip()
+    if not line.startswith(b"data:"):
+        return None
+    payload = line[5:].strip()
+    if payload == b"[DONE]":
+        return _DONE
+    try:
+        obj = json.loads(payload.decode("utf-8", errors="replace"))
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _iter_sse(chunks):
+    """The JSON events of a server-sent-events stream, however its bytes are cut into pieces."""
+    buf = b""
+    for chunk in chunks:
+        if not chunk:
+            continue
+        buf += chunk
+        while True:
+            nl = buf.find(b"\n")
+            if nl < 0:
+                break
+            line, buf = buf[:nl], buf[nl + 1:]
+            event = _sse_data(line)
+            if event is _DONE:
+                return
+            if event is not None:
+                yield event
+    if buf.strip():
+        event = _sse_data(buf)
+        if event is not None and event is not _DONE:
+            yield event
+
+
+def _json_complete(text: str) -> bool:
+    try:
+        json.loads(text or "")
+        return True
+    except ValueError:
+        return False
+
+
+def _merge(into: dict, extra: dict) -> None:
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(into.get(key), dict):
+            _merge(into[key], value)
+        else:
+            into[key] = value
+
+
+class _Acc:
+    """Rebuilds the assistant message from stream chunks, in the shape chat() returns it:
+    the text, and the tool calls with everything Gemini attached to them (its thought
+    signatures live in extra_content and must be sent back unchanged)."""
+
+    def __init__(self) -> None:
+        self.text: list[str] = []
+        self.calls: dict[int, dict] = {}
+        self.finish: str | None = None
+
+    def add(self, chunk: dict) -> str:
+        """Take in one chunk; returns the new text it carried ("" if none)."""
+        if chunk.get("error") and not chunk.get("choices"):
+            err = chunk["error"]
+            detail = err.get("message") if isinstance(err, dict) else err
+            raise GeminiError(f"gemini stream error: {detail}"[:300], 502)
+        choices = chunk.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return ""
+        choice = choices[0]
+        delta = choice.get("delta") or choice.get("message") or {}
+        if choice.get("finish_reason"):
+            self.finish = choice["finish_reason"]
+        for call in delta.get("tool_calls") or []:
+            self._add_call(call)
+        text = delta.get("content")
+        if isinstance(text, str) and text:
+            self.text.append(text)
+            return text
+        return ""
+
+    def _add_call(self, tc: dict) -> None:
+        fn = tc.get("function") or {}
+        name, args = fn.get("name") or "", fn.get("arguments") or ""
+        idx = tc.get("index")
+        if not isinstance(idx, int):               # Gemini sometimes sends whole calls with no index
+            idx = len(self.calls) if (name or tc.get("id")) else max(self.calls, default=0)
+        call = self.calls.get(idx)
+        if call is not None and name and call["function"]["name"] and (
+                (tc.get("id") or "") != call["id"] or _json_complete(call["function"]["arguments"])):
+            idx, call = max(self.calls) + 1, None  # numbered 0 again, but it's a different call
+        if call is None:
+            call = self.calls[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+        if tc.get("id"):
+            call["id"] = tc["id"]
+        if tc.get("type"):
+            call["type"] = tc["type"]
+        if name:
+            call["function"]["name"] = name
+        if args:
+            call["function"]["arguments"] += args
+        for key, value in tc.items():
+            if key in ("index", "id", "type", "function"):
+                continue
+            if isinstance(value, dict) and isinstance(call.get(key), dict):
+                _merge(call[key], value)
+            else:
+                call[key] = value
+
+    def message(self) -> dict:
+        msg: dict = {"role": "assistant", "content": "".join(self.text)}
+        if self.calls:
+            calls = [self.calls[i] for i in sorted(self.calls)]
+            for call in calls:
+                call["function"]["arguments"] = call["function"]["arguments"] or "{}"
+            msg["tool_calls"] = calls
+        return msg
+
+
+def _whole_reply_events(r):
+    """The server ignored stream=true and sent one ordinary JSON reply: pass it on as a single event."""
+    try:
+        data = r.json()
+    except ValueError:
+        raise GeminiError("gemini sent a non-JSON reply", 502) from None
+    try:
+        message = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        raise GeminiError("gemini returned no message", 502) from None
+    yield {"choices": [{"delta": message, "finish_reason": "stop"}]}
+
+
+class _Attempt:
+    """One streamed request, read on its own thread; what it receives goes to a shared queue."""
+
+    def __init__(self, number: int, fresh: bool, out: "queue.Queue") -> None:
+        self.number = number
+        self.fresh = fresh                                     # on a brand new connection
+        self.session = _new_session() if fresh else _get_session()
+        self.out = out
+        self.cancelled = threading.Event()
+        self.response = None
+        self.failed = False
+
+    def start(self, url: str, body: dict, headers: dict) -> None:
+        threading.Thread(target=self._run, args=(url, body, headers), daemon=True,
+                         name=f"gemini-stream-{self.number}").start()
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+        response = self.response
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    def _put(self, kind: str, value=None) -> None:
+        if not self.cancelled.is_set():
+            self.out.put((self, kind, value))
+
+    def _run(self, url: str, body: dict, headers: dict) -> None:
+        try:
+            r = self.session.post(url, json=body, headers=headers, timeout=(5.0, config.GEMINI_TIMEOUT),
+                                  stream=True)
+            self.response = r
+            if self.cancelled.is_set():
+                r.close()
+                return
+            if r.status_code == 429:
+                raise GeminiError("gemini rate limit hit, try again shortly", 429)
+            if r.status_code != 200:
+                err = GeminiError(f"gemini {r.status_code}: {r.text[:300]}", 502)
+                err.http = r.status_code
+                raise err
+            if "text/event-stream" in r.headers.get("Content-Type", ""):
+                events = _iter_sse(r.iter_content(chunk_size=None))   # chunks as they arrive, not in blocks
+            else:
+                events = _whole_reply_events(r)
+            for event in events:
+                if self.cancelled.is_set():
+                    return
+                self._put("chunk", event)
+            self._put("done")
+        except requests.Timeout:
+            self._put("error", GeminiError("gemini timed out", 504))
+        except requests.RequestException as exc:
+            self._put("error", GeminiError(f"could not reach gemini: {exc}", 502))
+        except GeminiError as exc:
+            self._put("error", exc)
+        except Exception as exc:
+            self._put("error", GeminiError(f"gemini stream failed: {exc}", 502))
+
+
+def _retryable(exc: GeminiError) -> bool:
+    """A failure of the connection or of Google's servers, as opposed to a bad request or a rate limit."""
+    http = getattr(exc, "http", None)
+    return exc.status != 429 and (http is None or http >= 500)
+
+
+def _stream_once(url: str, headers: dict, body: dict, hedge_s: float | None, info: dict):
+    hedge = config.GEMINI_HEDGE_S if hedge_s is None else hedge_s
+    out: queue.Queue = queue.Queue()
+    attempts: list[_Attempt] = []
+    acc = _Acc()
+    t0 = time.time()
+    winner = None
+    info.setdefault("hedged", False)
+
+    def launch(fresh: bool) -> None:
+        attempt = _Attempt(len(attempts), fresh, out)
+        attempts.append(attempt)
+        attempt.start(url, body, headers)
+
+    launch(False)
+    try:
+        while True:
+            if winner is None and len(attempts) == 1 and hedge > 0:
+                wait = t0 + hedge - time.time()               # until it's time to ask a second time
+            elif winner is None:
+                wait = t0 + config.GEMINI_TIMEOUT + 5 - time.time()
+            else:
+                wait = config.GEMINI_TIMEOUT + 5               # between two pieces of an answer
+            try:
+                attempt, kind, value = out.get(timeout=max(0.0, wait))
+            except queue.Empty:
+                if winner is None and len(attempts) == 1 and hedge > 0 and time.time() - t0 < config.GEMINI_TIMEOUT:
+                    print(f"[gemini] nothing after {hedge:g} s; asking again on a fresh connection")
+                    info["hedged"] = True
+                    launch(True)
+                    continue
+                raise GeminiError("gemini timed out", 504)
+            if winner is not None and attempt is not winner:
+                continue
+            if kind == "error":
+                if attempt is winner:
+                    raise value
+                attempt.failed = True
+                if all(a.failed for a in attempts):
+                    if len(attempts) < 2 and _retryable(value):
+                        print(f"[gemini] {value}; trying again on a fresh connection")
+                        info["hedged"] = True
+                        launch(True)
+                        continue
+                    raise value
+                continue
+            if winner is None:                                 # the first thing heard from Gemini
+                winner = attempt
+                info["ttft_ms"] = int((time.time() - t0) * 1000)
+                for other in attempts:
+                    if other is not attempt:
+                        other.cancel()
+                if attempt.fresh:                              # the old connection was the problem
+                    _replace_session(attempt.session)
+            if kind == "chunk":
+                text = acc.add(value)
+                if text:
+                    yield ("text", text)
+                continue
+            message = acc.message()                            # kind == "done"
+            if not message["content"] and not message.get("tool_calls"):
+                raise GeminiError("gemini returned no message", 502)
+            info["ms"] = int((time.time() - t0) * 1000)
+            info["finish"] = acc.finish
+            yield ("end", message)
+            return
+    finally:
+        for attempt in attempts:
+            attempt.cancel()
+        _touch()
+
+
+def chat_stream(messages: list[dict], tools: list[dict] | None = None, model: str | None = None,
+                max_tokens: int = 1024, reasoning: str | None = None, hedge_s: float | None = None,
+                info: dict | None = None):
+    """Like chat(), but streamed. Yields ("text", words) as Gemini writes them and finally
+    ("end", message) with the same message chat() would have returned.
+
+    No answer after GEMINI_HEDGE_S seconds (or a failed connection): the request is sent
+    again on a fresh connection and whichever answers first is used, which is what stops a
+    connection the router forgot from costing 15 s. `info` gets ttft_ms, ms and hedged.
+    Close the generator to stop early (the request is cancelled)."""
+    global _reasoning_ok
+    info = info if info is not None else {}
+    for attempt in range(2):
+        url, headers, body = _chat_request(messages, tools, model, max_tokens, False, reasoning)
+        body["stream"] = True
+        spoke = False
+        try:
+            for event in _stream_once(url, headers, body, hedge_s, info):
+                spoke = True
+                yield event
+            return
+        except GeminiError as exc:
+            if spoke or attempt or "reasoning_effort" not in body or "400" not in str(exc):
+                raise
+            print(f"[gemini] this model won't take reasoning_effort={reasoning}; using its default ({exc})")
+            _reasoning_ok = False
 
 
 # ---------------------------------------------------------------- keeping the connection warm
