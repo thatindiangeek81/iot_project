@@ -17,6 +17,9 @@ One voice says the whole reply, because MP3 and PCM can't be mixed in one reply.
 voice happened to make is made again with the chosen one. A sentence that can't be made ends the reply there
 (what was said stays said), as it always did.
 
+A voice that takes a sentence and then says nothing for `stall_s` (a connection that died quietly) is given up
+on: if the reply has no voice yet, the sentence is made again by the next one; otherwise the reply ends there.
+
 A voice is anything with .name, .provider, .fmt and speak(text, put): speak() calls put(audio bytes) for each
 piece as it is made and raises if it fails. put() raises Stop when the sentence isn't wanted any more.
 """
@@ -45,7 +48,7 @@ class _Item:
     """One sentence on its way to becoming audio."""
 
     __slots__ = ("text", "tag", "pieces", "gen", "started", "counted", "finished", "dropped", "error", "voice",
-                 "t_add", "t_first", "t_last")
+                 "skip", "current", "t_add", "t_first", "t_last")
 
     def __init__(self, text: str, tag) -> None:
         self.text = text
@@ -58,6 +61,8 @@ class _Item:
         self.dropped = False       # nobody wants it any more
         self.error = None
         self.voice = None          # the voice that made (or is making) it
+        self.skip: list = []       # voices that went quiet on this sentence: not asked again
+        self.current = None        # the voice being asked now
         self.t_add = time.monotonic()
         self.t_first = None        # when its first audio arrived
         self.t_last = None         # ... and the latest
@@ -158,6 +163,18 @@ class SpeechSession:
         with self.cv:
             return self._head() is None
 
+    def poll(self) -> None:
+        """For a reader that is waiting to see whether there is a reply at all (it isn't taking pieces yet): gives
+        up on a voice that has gone quiet, the way pieces() does for itself once the reply is going out."""
+        with self.cv:
+            head = self._head()
+            if (head is None or self._aborted or not head.started or head.finished or head.pieces
+                    or self._head_taken or time.monotonic() - head.t_last < self._stall_s):
+                return
+            if not self._unstick(head):
+                self._give_up(head)
+            self.cv.notify_all()
+
     @property
     def aborted(self) -> bool:
         return self._aborted
@@ -212,12 +229,49 @@ class SpeechSession:
             if head.started:
                 quiet = time.monotonic() - head.t_last
                 if quiet >= self._stall_s:
-                    head.dropped = True
-                    self.error = VoiceError("the voice stalled")
+                    if self._unstick(head):
+                        continue
+                    self._give_up(head)
+                    self.error = head.error
                     return None
                 self.cv.wait(max(0.01, min(1.0, self._stall_s - quiet)))
             else:
                 self.cv.wait(1.0)
+
+    def _release(self, item: _Item) -> None:
+        """With the lock held: the sentence gives its place back (its request, if still running, is ignored)."""
+        if item.counted:
+            item.counted = False
+            self._running -= 1
+
+    def _unstick(self, item: _Item) -> bool:
+        """With the lock held: the voice making this sentence has gone quiet. If it hasn't made any audio yet
+        and there is a voice left that the reply may still use, start the sentence again with that one."""
+        if item.voice is not None or item.pieces or item.dropped or self._aborted:
+            return False
+        gone = item.skip + ([item.current] if item.current is not None else [])
+        if not [v for v in (self._voices if self.voice is None else [self.voice]) if v not in gone]:
+            return False
+        print(f"[tts] {getattr(item.current, 'name', 'the voice')} has said nothing for {self._stall_s:g} s; "
+              f"making the sentence with another voice")
+        item.skip = gone
+        item.current = None
+        item.gen += 1                          # whatever the old request still does is ignored
+        self._release(item)
+        item.started = item.finished = False
+        item.error = None
+        self._waiting.appendleft(item)
+        self._pump()
+        return True
+
+    def _give_up(self, item: _Item) -> None:
+        """With the lock held: this sentence is not going to be made."""
+        item.error = VoiceError("the voice stalled")
+        item.finished = True
+        item.dropped = True
+        item.gen += 1
+        self._release(item)
+        self.cv.notify_all()
 
     def _pump(self) -> None:
         """With the lock held: start making waiting sentences while there are places free."""
@@ -239,19 +293,22 @@ class SpeechSession:
             self._fail(item, gen, VoiceError(f"{type(exc).__name__}: {exc}"))
         finally:
             with self.cv:
-                if item.gen == gen:
+                if item.gen == gen:               # not an old request that was given up on
                     item.finished = True
-                if item.counted:
-                    item.counted = False
-                    self._running -= 1
+                    self._release(item)
                 self._pump()
                 self.cv.notify_all()
 
     def _make(self, item: _Item, gen: int) -> None:
         with self.cv:
-            chain = [self.voice] if self.voice is not None else list(self._voices)
+            pool = [self.voice] if self.voice is not None else list(self._voices)
+            chain = [v for v in pool if v not in item.skip]
         errors = []
         for voice in chain:
+            with self.cv:
+                if item.gen != gen or item.dropped or self._aborted:
+                    return                        # given up on while an earlier voice was being asked
+                item.current = voice
             name = getattr(voice, "name", "voice")
             try:
                 voice.speak(item.text, lambda data, v=voice: self._put(item, gen, v, data))
@@ -267,7 +324,7 @@ class SpeechSession:
                 errors.append(f"{name}: no audio")
                 continue
             return
-        self._fail(item, gen, VoiceError("; ".join(errors)))
+        self._fail(item, gen, VoiceError("; ".join(errors) or "no voice left"))
 
     def _fail(self, item: _Item, gen: int, error: Exception) -> None:
         with self.cv:
@@ -294,6 +351,7 @@ class SpeechSession:
         with self.cv:
             item.gen += 1                     # whatever the old attempt still does is ignored
             item.pieces.clear()
+            self._release(item)
             voice = self.voice
         parts: list[bytes] = []
         try:

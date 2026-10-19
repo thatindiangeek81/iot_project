@@ -64,9 +64,9 @@ def parse_body(body):
 
 class Base(unittest.TestCase):
     def make(self, hold_s=30.0, fillers=("One sec, boss.",), apology="Sorry, boss, something went wrong.",
-             actions=None, voice=None, transport=None, **kw):
+             actions=None, voice=None, transport=None, voices=None, stall_s=None, **kw):
         self.voice = voice or FakeVoice()
-        self.session = SpeechSession([self.voice], parallel=3)
+        self.session = SpeechSession(voices or [self.voice], parallel=3, stall_s=stall_s)
         self.transport = transport or FakeTransport()
         self.header = Header()
         self.actions = actions if actions is not None else {}
@@ -310,6 +310,24 @@ class Failures(Base):
         self.finish_ok()
         self.assertEqual(self.transport.kinds()[-1], "end")
         self.assertEqual(parse_body(self.transport.body())[1], self.audio_of("One one one."))
+
+    def test_a_voice_that_goes_quiet_is_replaced_before_the_reply_begins(self):
+        """The old path gave Microsoft's voice 15 s and then used the laptop's; waiting for the voice's own
+        time-out here would take 45 s, which is how long the speaker waits before giving up on the laptop."""
+        edge = FakeVoice("edge", hold=True)
+        local = FakeVoice("local", fmt="pcm")
+        r = self.make(voice=local, voices=[edge, local], stall_s=0.2)
+        t0 = time.time()
+        r.sentence("Hello there friend.")
+        r.round_end(True)
+        self.assertTrue(wait_until(self.started, timeout=3))
+        self.assertLess(time.time() - t0, 2)
+        self.finish_ok()
+        head, audio = parse_body(self.transport.body())
+        self.assertEqual(head["fmt"], "pcm")
+        self.assertEqual(audio, local.audio("Hello there friend."))
+        self.assertIsNone(r.voice_error)
+        edge.gate("Hello there friend.").set()
 
     def test_close_always_returns_even_if_the_brain_never_finished(self):
         r = self.make()

@@ -257,6 +257,76 @@ class Failing(unittest.TestCase):
         v.gate("Hello there.").set()
 
 
+class Stalling(unittest.TestCase):
+    """A voice that takes the request and never answers (a connection that died quietly) must not hold the
+    reply up until its own long time-out. Microsoft's voice was the one that did this."""
+
+    def hung_and_working(self):
+        edge = FakeVoice("edge", hold=True)                 # waits for a gate nobody opens
+        local = FakeVoice("local", fmt="pcm")
+        return edge, local
+
+    def test_the_first_sentence_moves_to_the_next_voice_while_the_reply_has_not_begun(self):
+        edge, local = self.hung_and_working()
+        s = SpeechSession([edge, local], stall_s=0.2)
+        s.add("Hello there.")
+        t0 = time.time()
+        # what a reader does while it waits to see whether there is a reply: look, and ask for a check
+        self.assertTrue(wait_until(lambda: (s.poll(), s.peek())[1] is not None))
+        self.assertLess(time.time() - t0, 2)
+        self.assertIs(s.peek()[0], local)
+        s.close()
+        self.assertEqual(datas(s), [audio(local, "Hello there.")])
+        edge.gate("Hello there.").set()                     # the old request finally comes back: ignored
+        self.assertTrue(wait_until(lambda: edge.stopped == ["Hello there."]))
+        self.assertEqual(datas(s), [])
+
+    def test_a_reader_that_is_already_taking_audio_moves_on_too(self):
+        edge, local = self.hung_and_working()
+        s = SpeechSession([edge, local], stall_s=0.2)
+        s.add("Hello there.")
+        s.close()
+        self.assertEqual(datas(s), [audio(local, "Hello there.")])
+        edge.gate("Hello there.").set()
+
+    def test_with_nothing_to_move_to_the_first_sentence_gets_an_error(self):
+        v = FakeVoice(hold=True)
+        s = SpeechSession([v], stall_s=0.2)
+        s.add("Hello there.")
+        self.assertTrue(wait_until(lambda: (s.poll(), s.head_error())[1] is not None))
+        self.assertIn("stalled", str(s.head_error()))
+        self.assertIsNone(s.peek())
+        v.gate("Hello there.").set()
+
+    def test_once_the_reply_has_a_voice_a_stalled_sentence_ends_the_reply(self):
+        edge, local = self.hung_and_working()
+        edge.hold = False
+        s = SpeechSession([edge, local], stall_s=0.2)
+        s.add("One.")
+        it = s.pieces()
+        self.assertEqual(next(it)[1], audio(edge, "One."))
+        edge.hold = True
+        s.add("Two.")
+        s.close()
+        self.assertEqual(list(it), [])
+        self.assertIn("stalled", str(s.error))
+        self.assertEqual(local.calls, [])                   # MP3 and PCM can't be mixed in one reply
+        edge.gate("Two.").set()
+
+    def test_a_late_answer_from_the_old_request_leaves_the_count_of_places_alone(self):
+        edge, local = self.hung_and_working()
+        s = SpeechSession([edge, local], parallel=1, stall_s=0.2)
+        s.add("One.")
+        s.add("Two.")                                       # has to wait for the only place
+        s.close()
+        self.assertEqual(datas(s), [audio(local, "One."), audio(local, "Two.")])
+        edge.gate("One.").set()
+        edge.gate("Two.").set()
+        self.assertTrue(wait_until(lambda: edge.active == 0))
+        self.assertTrue(wait_until(lambda: s._running == 0))
+        self.assertLessEqual(local.peak, 1)
+
+
 class SharedLock(unittest.TestCase):
     def test_the_caller_can_wait_on_the_same_lock(self):
         cv = threading.Condition()

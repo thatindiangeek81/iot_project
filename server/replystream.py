@@ -184,6 +184,7 @@ class StreamingReply:
             while True:
                 if self.dead or self._failed or self.session.aborted:
                     return None
+                self.session.poll()                 # a voice that has gone quiet is replaced, not waited for
                 error = self.session.head_error()
                 if error is not None:
                     self.voice_error = error
