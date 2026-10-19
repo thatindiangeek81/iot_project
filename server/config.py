@@ -139,6 +139,11 @@ MIN_AUDIO_SECONDS = 0.3
 MAX_AUDIO_SECONDS = 30
 MAX_INPUT_CHARS = 500
 
+# --- Speed ------------------------------------------------------------
+# What each one does is explained under "Making replies faster" in the README.
+# Ping Google when the line has been quiet this long, so the connection never goes stale (0 = off)
+GEMINI_KEEPALIVE_S = _get_int("GEMINI_KEEPALIVE_S", 40)
+
 # --- Debug ------------------------------------------------------------
 SAVE_AUDIO = _get_bool("SAVE_AUDIO", True)
 LATENCY_LOG = _get_bool("LATENCY_LOG", True)          # one line per question in latency.log

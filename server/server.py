@@ -604,6 +604,9 @@ def main() -> None:
         return
 
     Handler.assistant = assistant
+    import gemini
+
+    gemini.keepalive_start()
     threading.Thread(target=discovery_loop, name="discovery", daemon=True).start()
     httpd = Server(("0.0.0.0", config.HTTP_PORT), Handler)
     print(f"\n[friday] listening on port {config.HTTP_PORT} (discovery on UDP {config.UDP_PORT})")
