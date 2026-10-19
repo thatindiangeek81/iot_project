@@ -1,5 +1,9 @@
+import json
+import os
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 import _path  # noqa: F401
@@ -192,6 +196,105 @@ class ChatStream(unittest.TestCase):
 
         with self.assertRaises(gemini.GeminiError):
             self.run_stream(FakeSession(Stalls()))
+
+
+class _SseServer(ThreadingHTTPServer):
+    """A pretend Gemini on this computer that answers like the real one: chunked server-sent events for a
+    streamed request, plain JSON otherwise, over connections that stay open. It counts the TCP connections."""
+
+    daemon_threads = True
+
+    def __init__(self):
+        self.connections = 0
+        self.rest_of_answer = threading.Event()               # clear it to hold the end of a streamed answer back
+        self.rest_of_answer.set()
+
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def setup(self):
+                super().setup()
+                outer.connections += 1
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                if body.get("stream"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    for number, event in enumerate((delta("Hello there friend. "), delta("Bye."))):
+                        if number:
+                            outer.rest_of_answer.wait(5)
+                        data = b"data: " + json.dumps(event).encode() + b"\n\n"
+                        self.wfile.write(b"%X\r\n%s\r\n" % (len(data), data))
+                    data = b"data: [DONE]\n\n"
+                    self.wfile.write(b"%X\r\n%s\r\n" % (len(data), data))
+                    self.wfile.write(b"0\r\n\r\n")
+                else:
+                    out = json.dumps({"choices": [{"message": {"role": "assistant", "content": "hi"}}]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(out)))
+                    self.end_headers()
+                    self.wfile.write(out)
+
+        super().__init__(("127.0.0.1", 0), Handler)
+
+    def handle_error(self, request, client_address):          # a client that hangs up mid-answer is part of the tests
+        pass
+
+
+class ConnectionReuse(unittest.TestCase):
+    """The connection to Google is kept for the next request: opening a new one costs a TCP and a TLS handshake."""
+
+    def setUp(self):
+        self.server = _SseServer()
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        env = mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"})
+        env.start()
+        self.addCleanup(env.stop)
+        for name, value in (("GEMINI_BASE", f"http://127.0.0.1:{self.server.server_address[1]}"),
+                            ("GEMINI_API_KEY", "test-key"), ("GEMINI_HEDGE_S", 0)):
+            patch = mock.patch.object(config, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        session = gemini._new_session()
+        patch = mock.patch.object(gemini, "_session", session)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(session.close)
+
+    def opened_by(self, call) -> int:
+        before = self.server.connections
+        call()
+        return self.server.connections - before
+
+    def test_streamed_answers_leave_the_connection_for_the_next_request(self):
+        self.assertEqual(self.opened_by(lambda: gemini.chat(MSG)), 1)              # the first request opens it
+        for number in (1, 2, 3):
+            events = []
+            self.assertEqual(self.opened_by(lambda: events.extend(gemini.chat_stream(MSG))), 0,
+                             f"streamed answer {number} opened a new connection")
+            self.assertEqual(events[-1][1]["content"], "Hello there friend. Bye.")
+        self.assertEqual(self.opened_by(lambda: gemini.chat(MSG)), 0)              # and an ordinary request too
+
+    def test_stopping_early_throws_that_connection_away(self):
+        """Half an answer is still on the wire: that connection can't be used for anything else."""
+        gemini.chat(MSG)
+        self.server.rest_of_answer.clear()
+        gen = gemini.chat_stream(MSG)
+        self.assertEqual(next(gen), ("text", "Hello there friend. "))
+        gen.close()
+        self.server.rest_of_answer.set()
+        self.assertEqual(self.opened_by(lambda: gemini.chat(MSG)), 1)
 
 
 if __name__ == "__main__":

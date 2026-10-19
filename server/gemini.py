@@ -270,6 +270,26 @@ def _whole_reply_events(r):
     yield {"choices": [{"delta": message, "finish_reason": "stop"}]}
 
 
+_HAND_BACK_WAIT_S = 0.25                                       # most a finished answer waits for its connection to be put back
+
+
+def _hand_back(r, chunks) -> None:
+    """Read what is left of an answer that has ended (after [DONE] that is only the end-of-body
+    marker) and close it. Closing a response that was not read to its end closes the connection
+    too, and the next request would pay for a new TCP and TLS handshake."""
+    try:
+        if chunks is not None:
+            for _ in chunks:
+                pass
+    except Exception:
+        pass
+    finally:
+        try:
+            r.close()
+        except Exception:
+            pass
+
+
 class _Attempt:
     """One streamed request, read on its own thread; what it receives goes to a shared queue."""
 
@@ -281,19 +301,33 @@ class _Attempt:
         self.cancelled = threading.Event()
         self.response = None
         self.failed = False
+        self.finished = False                                  # the whole answer has been read
+        self.settled = threading.Event()                       # the thread is done with its connection
+        self._lock = threading.Lock()
 
     def start(self, url: str, body: dict, headers: dict) -> None:
         threading.Thread(target=self._run, args=(url, body, headers), daemon=True,
                          name=f"gemini-stream-{self.number}").start()
 
     def cancel(self) -> None:
-        self.cancelled.set()
-        response = self.response
+        with self._lock:
+            self.cancelled.set()
+            if self.finished:                                  # a complete answer: _run puts its connection back
+                return
+            response = self.response
         if response is not None:
             try:
                 response.close()
             except Exception:
                 pass
+
+    def _finish(self) -> bool:
+        """The answer ended normally. False if it was cancelled meanwhile (and its connection closed)."""
+        with self._lock:
+            if self.cancelled.is_set():
+                return False
+            self.finished = True
+            return True
 
     def _put(self, kind: str, value=None) -> None:
         if not self.cancelled.is_set():
@@ -313,15 +347,20 @@ class _Attempt:
                 err = GeminiError(f"gemini {r.status_code}: {r.text[:300]}", 502)
                 err.http = r.status_code
                 raise err
+            chunks = None
             if "text/event-stream" in r.headers.get("Content-Type", ""):
-                events = _iter_sse(r.iter_content(chunk_size=None))   # chunks as they arrive, not in blocks
+                chunks = r.iter_content(chunk_size=None)           # chunks as they arrive, not in blocks
+                events = _iter_sse(chunks)
             else:
                 events = _whole_reply_events(r)
             for event in events:
                 if self.cancelled.is_set():
                     return
                 self._put("chunk", event)
+            if not self._finish():
+                return
             self._put("done")
+            _hand_back(r, chunks)                                  # after "done": the caller doesn't wait for this
         except requests.Timeout:
             self._put("error", GeminiError("gemini timed out", 504))
         except requests.RequestException as exc:
@@ -330,6 +369,8 @@ class _Attempt:
             self._put("error", exc)
         except Exception as exc:
             self._put("error", GeminiError(f"gemini stream failed: {exc}", 502))
+        finally:
+            self.settled.set()
 
 
 def _retryable(exc: GeminiError) -> bool:
@@ -407,6 +448,8 @@ def _stream_once(url: str, headers: dict, body: dict, hedge_s: float | None, inf
     finally:
         for attempt in attempts:
             attempt.cancel()
+        if winner is not None and winner.finished:             # it is putting its connection back: a moment, no more
+            winner.settled.wait(_HAND_BACK_WAIT_S)
         _touch()
 
 
