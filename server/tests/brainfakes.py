@@ -29,6 +29,9 @@ class FakeJukebox:
     def __init__(self):
         self.played = []
 
+    def observe(self, header):
+        return header is not None
+
     def describe(self):
         return "Music: nothing is playing."
 

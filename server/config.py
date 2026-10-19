@@ -152,6 +152,17 @@ WEATHER_PREFETCH = _get_bool("WEATHER_PREFETCH", True)
 WEATHER_TIMEOUT = _get_float("WEATHER_TIMEOUT", 4.0)        # seconds to wait for Open-Meteo
 # Ping Google when the line has been quiet this long, so the connection never goes stale (0 = off)
 GEMINI_KEEPALIVE_S = _get_int("GEMINI_KEEPALIVE_S", 40)
+# Start speaking while Gemini is still writing (0 = write the whole reply first, as before). A request
+# can override this with an X-Stream: 0 or 1 header, which is how the benchmark compares the two.
+STREAM_REPLIES = _get_bool("STREAM_REPLIES", True)
+# A reply isn't started until Gemini has finished the round that writes it (so a music command can't
+# arrive too late for it), unless the round takes longer than this many milliseconds
+STREAM_HOLD_MS = _get_int("STREAM_HOLD_MS", 1500)
+# Say "One sec, boss." while a slow tool (web search, weather that isn't cached) runs
+TOOL_FILLER = _get_bool("TOOL_FILLER", True)
+# Streaming switches itself off (until the server is restarted) after this many turns in a row where
+# it broke before sending anything; those turns were answered the normal way
+STREAM_MAX_FAILS = _get_int("STREAM_MAX_FAILS", 3)
 
 # --- Debug ------------------------------------------------------------
 SAVE_AUDIO = _get_bool("SAVE_AUDIO", True)

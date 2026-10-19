@@ -417,6 +417,10 @@ class Brain:
             messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "name": name,
                              "content": result})
 
+    def actions(self) -> dict:
+        """What this turn has asked the speaker to do so far (play, pause, volume)."""
+        return dict(self._actions)
+
     def _result(self, reply: str, used: list, timing: dict, started: float, ctx: dict) -> dict:
         return {"reply": reply, "tools": used, "actions": dict(self._actions), "timing": timing,
                 "ms": int((time.time() - started) * 1000),
