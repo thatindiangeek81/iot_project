@@ -152,6 +152,8 @@ WEATHER_PREFETCH = _get_bool("WEATHER_PREFETCH", True)
 WEATHER_TIMEOUT = _get_float("WEATHER_TIMEOUT", 4.0)        # seconds to wait for Open-Meteo
 # Ping Google when the line has been quiet this long, so the connection never goes stale (0 = off)
 GEMINI_KEEPALIVE_S = _get_int("GEMINI_KEEPALIVE_S", 40)
+# Run Whisper once at start-up so the first question isn't the slow one
+STT_WARMUP = _get_bool("STT_WARMUP", True)
 # Start speaking while Gemini is still writing (0 = write the whole reply first, as before). A request
 # can override this with an X-Stream: 0 or 1 header, which is how the benchmark compares the two.
 STREAM_REPLIES = _get_bool("STREAM_REPLIES", True)

@@ -83,6 +83,8 @@ class Assistant:
             from stt import STT
 
             self.stt = STT()
+            if config.STT_WARMUP:
+                self.stt.warmup()
 
     # ------------------------------------------------------------ pieces
 
