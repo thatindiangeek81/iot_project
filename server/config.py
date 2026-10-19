@@ -102,6 +102,7 @@ EDGE_TIMEOUT = _get_float("EDGE_TIMEOUT", 15.0)
 EDGE_NO_BOSS_COMMA = _get_bool("EDGE_NO_BOSS_COMMA", True)   # "Got it, boss." is read as "Got it boss."
 TTS_CACHE_MAX = _get_int("TTS_CACHE_MAX", 500)        # short replies kept as audio files (0 = off)
 TTS_CACHE_DIR = _get("TTS_CACHE_DIR", str(HERE / "voice_cache"))
+TTS_PARALLEL = _get_int("TTS_PARALLEL", 3)           # sentences of one reply the Edge voice makes at the same time
 # Local voice: leave both blank to use the Windows voice. Set both to use Piper.
 PIPER_EXE = _get("PIPER_EXE")
 PIPER_MODEL = _get("PIPER_MODEL")
