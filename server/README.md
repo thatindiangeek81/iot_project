@@ -204,6 +204,68 @@ The S3's `[time]` line adds the upload and the speaker's buffer on top.
 The database isn't a bottleneck: all of its queries together take about 10–20 ms per question,
 and memories and the music library are kept in RAM.
 
+## Making replies faster
+
+Friday no longer waits for Gemini to finish the whole reply before she starts talking. The answer is
+cut into sentences as it arrives, the first one is spoken while the rest is still being written, and the
+voice makes the next ones in the background so there's no gap. This works for spoken questions (`/ask`)
+and typed ones (`/say`). [`docs/latency.md`](../docs/latency.md) has the measurements behind it and the
+ideas that were left out on purpose.
+
+| Setting | Default | Does |
+|---|---|---|
+| `STREAM_REPLIES` | `1` | Start speaking while Gemini is still writing. `0` = the old way, the whole reply first |
+| `STREAM_HOLD_MS` | `1500` | A reply is started when Gemini has finished the round that writes it, or after this many ms, whichever comes first. Once it has started, a music command can't be added to it |
+| `TOOL_FILLER` | `1` | Says "One sec, boss." while a slow tool (web search, a weather lookup that isn't cached) runs |
+| `TTS_PARALLEL` | `3` | How many sentences of one reply the Edge voice makes at the same time. `1` = one after another |
+| `STREAM_MAX_FAILS` | `3` | After this many turns in a row where streaming broke before sending anything, it switches itself off until the server restarts. Those turns were answered the old way |
+| `GEMINI_HEDGE_S` | `3` | No first word from Gemini after this many seconds: ask again on a fresh connection and use whichever answers first. `0` = never |
+| `GEMINI_KEEPALIVE_S` | `40` | A tiny request to Google when the line has been quiet this long, so its connection doesn't go stale. `0` = off |
+| `WEATHER_CACHE_S`, `WEATHER_PREFETCH`, `WEATHER_TIMEOUT` | `600`, `1`, `4` | A weather lookup is reused for 10 minutes, your profile's city is refreshed in the background, and Open-Meteo gets 4 s before Friday gives up on it |
+| `STT_WARMUP` | `1` | Runs Whisper once on a second of noise when the server starts, so the first question isn't the slow one |
+
+`STREAM_REPLIES=0` brings back the old behaviour exactly. The server also falls back to it by itself for a
+question where streaming fails before it has sent anything (the console says
+`[stream] broke before sending anything (...)`, with the reason). `python server.py --test` always uses the old way.
+
+### Measuring
+
+With the server running, in another terminal on the same laptop:
+
+```
+python tools/bench_latency.py                    8 questions x 3 rounds, each asked with streaming off and on, in turns
+python tools/bench_latency.py --runs 5 --gap 60  steadier, with a minute between questions so the connections go cold
+python tools/bench_latency.py --tools            also questions that need the weather or a web search
+python tools/bench_latency.py --wav q.wav        also a recording (that includes Whisper); --csv times.csv keeps every timing
+python tools/diag_network.py                     what a new connection to Google, Open-Meteo and the Edge voice costs
+python tools/diag_network.py --idle              and how long an idle connection to Google survives (about 8 minutes)
+```
+
+The benchmark prints the time to the first sound and to the end of each reply as median, slowest 10 % and
+worst. Look at the slowest 10 %: that's what you notice. `diag_network.py` says in words what its numbers
+mean, and suggests a `GEMINI_KEEPALIVE_S` if idle connections die on your network. Neither changes any setting.
+
+Two request headers help when testing by hand (the speaker never sends them). `X-Stream: 0` or `1` decides
+streaming for that one request, even after the automatic switch-off. `X-No-Log: 1` answers normally but keeps
+the exchange out of the history and out of what she learns, which is how the benchmark avoids filling her
+memory with its questions.
+
+### Reading `latency.log`
+
+One line per question, tab-separated, with a header row. (A log from an older version, with other columns,
+is renamed to `latency.<date>.log` and a new one is started.)
+
+| Column | Meaning |
+|---|---|
+| `first_audio_ms` | From the question reaching the laptop to the first sound leaving it. If she said "One sec, boss." first, that is the filler: `answer_ms` is when the answer began |
+| `stt_ms`, `prompt_ms`, `gemini_ms`, `tool_ms`, `tts_ms` | Hearing, building the prompt, Gemini (`a+b` = several rounds), tools, and the voice (for a streamed reply: how long the first sentence took to become audio) |
+| `quick` | 1 = a music command answered by the laptop without a second Gemini call |
+| `stream` | 1 = the reply was streamed. Then `first_audio_ms` is about `stt_ms` + `first_sentence_ms` + `tts_ms`, and `gemini_ms` is all of Gemini's writing, which carries on after that |
+| `first_sentence_ms`, `ttft_ms` | Streamed only: Gemini's time to the first full sentence, and to its first word |
+| `hedged` | Streamed only: 1 = the first word took so long that Friday asked again |
+| `filler` | Streamed only: 1 = a filler line was spoken while a tool ran |
+| `answer_ms` | Streamed only: when the answer itself (not the filler) started to sound |
+
 ## Privacy
 
 Recordings, transcripts and memories stay on this laptop. What leaves it: the text of
@@ -222,7 +284,10 @@ sent once to Gemini's embedding API to index it. Passwords, PINs and card number
 | `[tool] web_search(...) -> {"error": ...duckduckgo...}` | `pip install ddgs`, or DuckDuckGo is rate-limiting you: wait a minute |
 | `time zone Asia/Kolkata not found` | `pip install tzdata` |
 | The S3 never finds the laptop | Firewall rules above, network set to Private, same Wi-Fi. Check with `python client.py --find` from another PC |
-| First answer slow | Whisper loads on start; the first Gemini call also opens its connection |
+| First answer slow | Whisper loads and warms up on start (`STT_WARMUP`), and the first Gemini call opens its connection: wait for `[stt] warmed up` and `[gemini] connection ready` |
+| `[stream] broke before sending anything (...)` | Streaming failed before any sound went out, so that question was answered the old way. The text in brackets is the reason. After `STREAM_MAX_FAILS` in a row it stays off until the restart; `STREAM_REPLIES=0` turns it off for good |
+| `[gemini] nothing after 3 s; asking again on a fresh connection` | Normal now and then: Gemini was slow to start, so Friday asked a second time and used whichever answered first. If it's every question, run `python tools/diag_network.py` |
+| `[tts] stopped mid-reply: ...` | The voice failed after she had started speaking, so the reply ends where it stopped. The reason follows the colon (usually the internet) |
 | `[music] 0 songs in the library` | Run `python music.py scan` |
 | `ffmpeg not found` at start-up | `winget install Gyan.FFmpeg`, open a new terminal; or set `FFMPEG=C:\path\to\ffmpeg.exe` in `.env`. Without it MP3s still play, M4As don't |
 | She plays the wrong song | Check the match with `python music.py list`; fix `title` / `artist` in Adminer |

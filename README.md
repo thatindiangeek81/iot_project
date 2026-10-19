@@ -17,7 +17,7 @@ ESP32-S3 ── Wi-Fi ──▶ server/   laptop: Whisper · Gemini · memory ·
 | [`server/`](server) | The laptop brain in Python: hearing, Gemini + tools, memory, voice, music library |
 | [`worker/`](worker) | Cloudflare Worker used as the backup brain |
 | [`db/`](db) | PostgreSQL + Adminer in Docker: Friday's memory |
-| [`docs/`](docs) | Architecture overview |
+| [`docs/`](docs) | Architecture overview and [why replies take the time they do](docs/latency.md) |
 
 ## Getting started
 
