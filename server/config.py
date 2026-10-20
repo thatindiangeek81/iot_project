@@ -158,7 +158,7 @@ STT_WARMUP = _get_bool("STT_WARMUP", True)
 # can override this with an X-Stream: 0 or 1 header, which is how the benchmark compares the two.
 STREAM_REPLIES = _get_bool("STREAM_REPLIES", True)
 # A reply isn't started until Gemini has finished the round that writes it (so a music command can't
-# arrive too late for it), unless the round takes longer than this many milliseconds
+# arrive too late for it), unless this many milliseconds have passed since the first sentence of that round
 STREAM_HOLD_MS = _get_int("STREAM_HOLD_MS", 1500)
 # Say "One sec, boss." while a slow tool (web search, weather that isn't cached) runs
 TOOL_FILLER = _get_bool("TOOL_FILLER", True)

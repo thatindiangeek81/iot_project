@@ -39,10 +39,12 @@ Three things stand out.
 | Speak sentence by sentence while Gemini is still writing | Waiting for the whole reply before any sound | Gains grow with the length of the answer. A one-sentence reply gains almost nothing, because Gemini has finished by the time its first sentence is complete | `STREAM_REPLIES=0` |
 | Make up to 3 sentences at once, play them in order | Gaps between sentences | No pause between sentences when the voice is slower than speech | `TTS_PARALLEL=1` |
 | Ask Gemini again on a fresh connection if there is no first word after 3 s | The 11 to 16 s stalls | A stall costs about 3 s plus a normal call, not the whole time-out | `GEMINI_HEDGE_S=0` |
-| TCP keep-alive, and a tiny request to Google when the line has been quiet for 40 s | Connections that die while idle | The first question after a quiet spell is as fast as the others | `GEMINI_KEEPALIVE_S=0` |
+| TCP keep-alive, a tiny request to Google when the line has been quiet for 40 s, and the connection kept (not closed) after a streamed answer | Connections that die while idle, and a new secure connection for every question | The first question after a quiet spell is as fast as the others | `GEMINI_KEEPALIVE_S=0` (only the ping) |
 | Remember each weather lookup for 10 minutes, refresh your home city in the background, give Open-Meteo 4 s | The 12.6 s weather round | "What's the weather" answered from memory in milliseconds | `WEATHER_CACHE_S=0`, `WEATHER_PREFETCH=0` |
 | Say "One sec, boss." while a slow tool runs | Silence during a web search | Doesn't make it faster, makes the wait feel shorter | `TOOL_FILLER=0` |
 | Run Whisper once at start-up | The slow first question after a restart | The model is awake before the first real recording | `STT_WARMUP=0` |
+| Send small writes to the speaker at once (`TCP_NODELAY`) | The first bytes of a sentence waiting in the socket for the next packet or an acknowledgement | Tens of milliseconds at most. Python's `http.server` doesn't do this by itself; xiaozhi's asyncio server does | none |
+| Replace a voice that has said nothing for `EDGE_TIMEOUT` (15 s) with the next one, before the reply starts | A request to Microsoft's service that hangs instead of failing, using up the 45 s the speaker waits for the laptop | The sentence is made by the local voice instead of the speaker giving up | `EDGE_TIMEOUT` |
 
 The voice's 2.7 s start-up is the biggest single piece of a short reply, and **none of these changes
 touch it**, except that for longer replies it now overlaps with Gemini's writing instead of following it.
@@ -53,16 +55,23 @@ The speaker reads a reply as one frame: a header (the text, the timings and the 
 "play track 12") followed by the audio. The header cannot change once it has been sent, and whether the
 reply carries an action is only known when Gemini has finished the round that writes it. So:
 
-- A reply is started when Gemini finishes the round without asking for a tool, or after `STREAM_HOLD_MS`
-  (1.5 s), whichever comes first. After that point a music command can no longer be added: the music tool
-  answers that the reply has already started, and Gemini says so instead of promising something the
-  speaker won't do.
-- While a slow tool runs (web search, an uncached weather lookup) the filler line is spoken first.
-- If streaming breaks before a single byte has gone out, the turn is answered the old way. After
-  `STREAM_MAX_FAILS` such turns in a row streaming switches itself off until the server is restarted.
+- A reply is started when Gemini finishes the round without asking for a tool, or `STREAM_HOLD_MS` (1.5 s)
+  after the first sentence of that round, whichever comes first. After that point a music command can no
+  longer be added: the music tool answers that the reply has already started, and Gemini says so instead of
+  promising something the speaker won't do.
+- While a slow tool runs (web search, an uncached weather lookup) the filler line is spoken first, unless
+  Microsoft's voice looks unreachable: the filler comes from the voice cache, which would make that voice
+  the voice of the whole reply (MP3 and PCM can't be mixed in one reply). The server only learns that the
+  voice is down from a request that fails, so the first tool question after an outage begins can still end
+  after the filler; the next one is spoken by the local voice.
+- If streaming breaks before a single byte has gone out, the turn is answered the old way, unless a tool had
+  already run (then the error is returned rather than running the tool a second time). Only turns that the
+  old way then answers count towards `STREAM_MAX_FAILS`; after that many in a row streaming switches itself
+  off until the server is restarted. A failure the old way shares (Gemini down, say) is not blamed on
+  streaming.
 - If Gemini fails after the reply has started, she finishes with a short apology ("Sorry, something went
   wrong, boss.") rather than stopping mid-sentence. If the voice itself fails, the reply ends where it
-  stopped (`[tts] stopped mid-reply` in the console).
+  stopped (`[tts] stopped mid-reply` in the console) and Gemini is told to stop writing.
 - If the speaker hangs up mid-reply, Gemini and the voice are told to stop.
 - `X-Stream: 0` or `1` on a request overrides all of this for that request (even after the automatic
   switch-off). The benchmark uses it to ask the same question both ways.
@@ -82,6 +91,30 @@ boss.") on your laptop, against the 2.7 s the server's own log showed.
 | Speak the first sentence with the local Piper voice and the rest with Edge | You'd accept a different voice for the first sentence in exchange for a first sound well under 2 s |
 | Lower `STREAM_HOLD_MS` | The benchmark shows long answers waiting for the hold, and you rarely say "play" after a long question |
 
+## Compared with xiaozhi
+
+xiaozhi-esp32 and its server are open source and the best-known ESP32 voice assistant, so their code is the
+obvious thing to compare with. Reading it:
+
+| | xiaozhi (default setup) | Friday |
+|---|---|---|
+| Connection | One WebSocket per session, Opus frames both ways | One HTTP request per question, the reply streamed back as one body |
+| Microphone | Streams live while you talk; the server finds the end of speech | The recording is uploaded after the button is released |
+| Answer to speech | LLM streamed, cut at punctuation, spoken segment by segment | The same, on this branch |
+| Voice | EdgeTTS, one whole segment at a time. Only the "double-stream" cloud voices keep a connection open | Edge, up to 3 sentences at once, the local voice as fallback |
+| Pacing | First 5 frames (0.3 s) at once, then one every 60 ms | The speaker buffers 0.5 s, then plays |
+| Server sockets | asyncio, `TCP_NODELAY` by default | Set explicitly now |
+
+With its default pieces xiaozhi is not faster than this branch. Its advantages are live microphone audio and,
+when configured, streaming voice services. What those would cost here (the gains are estimates):
+
+| Idea | Gain | Cost |
+|---|---|---|
+| Stream the microphone while the button is held | 0.2 to 0.5 s (the upload after release) | Firmware and server change |
+| A voice that starts faster than Edge's 2.7 s | The largest single piece of a short reply | See the table above; run `diag_network.py` first |
+| Take the music action out of the audio header, so a reply never waits for `STREAM_HOLD_MS` | Up to 1.5 s on tool and music answers | Firmware change |
+| `WHISPER_DEVICE=cuda` | Only if `stt_ms` is high in `latency.log` | An NVIDIA GPU with CUDA 12 |
+
 ## Finding out if it helped
 
 On the laptop that runs the server, with the server running:
@@ -98,7 +131,7 @@ Its questions are sent with `X-No-Log: 1`, so they don't end up in the history o
 ## What has not been checked
 
 All of this is built and tested against stand-ins for Gemini, the voice and Whisper, including real HTTP
-between a fake speaker and the server (155 tests, `python -m unittest discover -s tests` in `server/`).
+between a fake speaker and the server (182 tests, `python -m unittest discover -s tests` in `server/`).
 It has not been run against the real services or with the speaker, so every "what to expect" above is an
 expectation, not a measurement. If anything sounds wrong on the first real run, set `STREAM_REPLIES=0`
 and she behaves exactly as she did before.

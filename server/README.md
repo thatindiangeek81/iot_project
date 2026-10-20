@@ -215,7 +215,7 @@ ideas that were left out on purpose.
 | Setting | Default | Does |
 |---|---|---|
 | `STREAM_REPLIES` | `1` | Start speaking while Gemini is still writing. `0` = the old way, the whole reply first |
-| `STREAM_HOLD_MS` | `1500` | A reply is started when Gemini has finished the round that writes it, or after this many ms, whichever comes first. Once it has started, a music command can't be added to it |
+| `STREAM_HOLD_MS` | `1500` | A reply is started when Gemini has finished the round that writes it, or this many ms after the first sentence of that round, whichever comes first. Once it has started, a music command can't be added to it |
 | `TOOL_FILLER` | `1` | Says "One sec, boss." while a slow tool (web search, a weather lookup that isn't cached) runs |
 | `TTS_PARALLEL` | `3` | How many sentences of one reply the Edge voice makes at the same time. `1` = one after another |
 | `STREAM_MAX_FAILS` | `3` | After this many turns in a row where streaming broke before sending anything, it switches itself off until the server restarts. Those turns were answered the old way |
@@ -260,11 +260,11 @@ is renamed to `latency.<date>.log` and a new one is started.)
 | `first_audio_ms` | From the question reaching the laptop to the first sound leaving it. If she said "One sec, boss." first, that is the filler: `answer_ms` is when the answer began |
 | `stt_ms`, `prompt_ms`, `gemini_ms`, `tool_ms`, `tts_ms` | Hearing, building the prompt, Gemini (`a+b` = several rounds), tools, and the voice (for a streamed reply: how long the first sentence took to become audio) |
 | `quick` | 1 = a music command answered by the laptop without a second Gemini call |
-| `stream` | 1 = the reply was streamed. Then `first_audio_ms` is about `stt_ms` + `first_sentence_ms` + `tts_ms`, and `gemini_ms` is all of Gemini's writing, which carries on after that |
+| `stream` | 1 = the reply was streamed. Then, for a plain reply (no filler, no tool call), `first_audio_ms` is about `stt_ms` + `first_sentence_ms` + `tts_ms`; the console line shows any wait for the hold as "held back". `gemini_ms` is all of Gemini's writing, which carries on after that |
 | `first_sentence_ms`, `ttft_ms` | Streamed only: Gemini's time to the first full sentence, and to its first word |
 | `hedged` | Streamed only: 1 = the first word took so long that Friday asked again |
 | `filler` | Streamed only: 1 = a filler line was spoken while a tool ran |
-| `answer_ms` | Streamed only: when the answer itself (not the filler) started to sound |
+| `answer_ms` | Streamed only: when the answer itself started to sound: the first audio of the last round that was heard, so not the filler and not something said before a tool call |
 
 ## Privacy
 
