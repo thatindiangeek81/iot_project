@@ -65,7 +65,8 @@ class Assistant:
         from tts import TTS
 
         self.turn_lock = threading.Lock()      # one turn at a time: there is one speaker
-        self.stream_fails = 0                  # streamed turns in a row that broke before sending anything
+        self.stream_fails = 0                  # streamed turns in a row that broke before sending anything and
+                                               # were then answered the normal way
         self.memory = Memory()
         self.brain = Brain(self.memory)
         self.background = Background()
@@ -467,31 +468,35 @@ class Handler(BaseHTTPRequestHandler):
                                                                       stt_ms),
             a.brain.actions, offset_ms=int((time.time() - self.t_start) * 1000),
             hold_s=config.STREAM_HOLD_MS / 1000.0, fillers=FILLERS if config.TOOL_FILLER else (),
-            apology=ERROR_LINE)
+            apology=ERROR_LINE, filler_ok=a.tts.filler_ok)
         reply.start()
         try:
             try:
                 result = a.think_stream(heard, self.music_state, reply)
             except TurnCancelled:
-                print("[turn] the speaker hung up mid-reply")
+                print("[turn] the speaker hung up mid-reply" if reply.dead
+                      else "[turn] the voice stopped mid-reply, so Gemini was stopped too")
                 return True
             except TurnError as exc:
                 reply.finish(error=exc)
-                if not reply.decided:
-                    raise                      # nothing was sent: the caller answers with the error
                 reply.wait()
+                if reply.dead:
+                    print("[turn] the speaker hung up mid-reply")
+                    return True
+                if not reply.started:
+                    raise                      # nothing reached the speaker: the caller answers with the error
                 print(f"[turn] failed after the reply had started: {exc}")
                 return True
             except Exception as exc:
                 reply.finish(error=exc)
-                if reply.decided:
-                    reply.wait()
+                reply.wait()
+                if reply.dead or reply.started:
                     print(f"[turn] the streamed reply broke after it had started: {type(exc).__name__}: {exc}")
                     return True
-                a.stream_fails += 1
-                off = "; streaming is now off until the server is restarted" if not a.stream_enabled() else ""
+                if reply.tools_ran:
+                    raise                      # the tools have run: asking the question again would repeat them
                 print(f"[stream] broke before sending anything ({type(exc).__name__}: {exc}); "
-                      f"answering the normal way{off}")
+                      f"answering the normal way")
                 return False
             reply.finish()
             reply.wait()
@@ -517,6 +522,14 @@ class Handler(BaseHTTPRequestHandler):
         self._after(heard, result)
         return True
 
+    def _stream_failed(self) -> None:
+        """A streamed turn broke before it sent anything, and the normal way has now answered the same question:
+        that points at streaming. Enough of these in a row and it switches itself off."""
+        a = self.assistant
+        a.stream_fails += 1
+        if not a.stream_enabled():
+            print("[stream] this keeps happening; streaming is off until the server is restarted")
+
     def _after(self, heard: str, result: dict) -> None:
         """Log the exchange and learn from it, unless the request says it's a test (X-No-Log: 1):
         the benchmark asks dozens of questions and shouldn't fill the history and the memory with them."""
@@ -532,9 +545,14 @@ class Handler(BaseHTTPRequestHandler):
         self._after(text, result)
 
     def _say(self, text: str) -> None:
-        if self._wants_stream() and self._turn_streamed(text, 0, typed=True):
-            return
+        fell_back = False
+        if self._wants_stream():
+            if self._turn_streamed(text, 0, typed=True):
+                return
+            fell_back = True
         result = self.assistant.think(text, self.music_state)
+        if fell_back:
+            self._stream_failed()
         backend, first, rest, tts_ms = self._first_voice(result["reply"], action=result.get("actions") or {})
         header = self._header(None, result, backend, tts_ms, 0)
         audio = self._stream(header, first, rest, backend)
@@ -550,12 +568,17 @@ class Handler(BaseHTTPRequestHandler):
         _save("last_question.wav", pcm)
         heard, raw, stt_ms = a.hear(pcm)
 
-        if heard and not debug and self._wants_stream() and self._turn_streamed(heard, stt_ms, typed=False):
-            return
+        fell_back = False
+        if heard and not debug and self._wants_stream():
+            if self._turn_streamed(heard, stt_ms, typed=False):
+                return
+            fell_back = True
 
         result = {"reply": NOT_HEARD_REPLY, "ms": 0, "tools": [], "actions": {}}
         if heard:
             result = a.think(heard, self.music_state)
+            if fell_back:
+                self._stream_failed()
 
         if debug:
             self._json({"heard": heard, "raw_transcript": raw, "reply": result["reply"], "stt_ms": stt_ms,

@@ -229,6 +229,30 @@ class ToolRounds(Base):
         r.round_end(True)
         self.finish_ok()
 
+    def test_no_filler_when_the_voice_looks_down(self):
+        """A line from the cache would make Edge the voice of the whole reply; if Edge is down, the reply would end
+        right after the filler. Better to wait for the answer and let whichever voice works say it."""
+        r = self.make(filler_ok=lambda: False)
+        r.round_end(False, ["web_search"], slow=True)
+        self.assertIsNone(r.filler)
+        self.assertTrue(r.music_ok())                         # nothing was decided
+        r.sentence("Here it is.")
+        r.round_end(True)
+        self.finish_ok()
+        self.assertEqual(parse_body(self.transport.body())[1], self.audio_of("Here it is."))
+
+    def test_it_remembers_that_tools_were_asked_for(self):
+        r = self.make()
+        self.assertFalse(r.tools_ran)
+        r.sentence("Hello there friend.")
+        r.round_end(True)
+        self.assertFalse(r.tools_ran)
+        r2 = StreamingReply(SpeechSession([FakeVoice()]), FakeTransport(), Header(), dict)
+        r2.round_end(False, ["save_memory"], slow=False)
+        self.assertTrue(r2.tools_ran)
+        r2.close()
+        self.finish_ok()
+
     def test_a_filler_is_not_added_behind_a_reply_that_is_already_going_out(self):
         r = self.make(hold_s=0.05)
         r.sentence("Let me see what I can find about that.")
@@ -328,6 +352,24 @@ class Failures(Base):
         self.assertEqual(audio, local.audio("Hello there friend."))
         self.assertIsNone(r.voice_error)
         edge.gate("Hello there friend.").set()
+
+    def test_a_voice_that_dies_part_way_stops_the_brain_and_the_voice(self):
+        v = FakeVoice()
+        v.fail["Two."] = RuntimeError("edge voice failed")
+        r = self.make(voice=v, hold_s=0.05)                   # the brain is still talking when the voice dies
+        for text in ("One one one.", "Two.", "Three."):
+            r.sentence(text)
+        self.assertTrue(wait_until(r.cancelled))              # the brain stops at its next chunk
+        self.assertTrue(wait_until(lambda: self.session.aborted))
+        made = list(v.calls)
+        r.sentence("Four.")                                     # nothing more is made for a reply that is over
+        r.round_end(True)
+        r.finish()
+        r.wait(3)
+        time.sleep(0.05)
+        self.assertEqual(v.calls, made)
+        self.assertEqual(self.transport.kinds()[-1], "end")
+        self.assertFalse(r.dead)                                # the speaker didn't hang up; the voice stopped
 
     def test_close_always_returns_even_if_the_brain_never_finished(self):
         r = self.make()

@@ -28,10 +28,31 @@ LEGACY = {"reply": "Legacy answer.", "ms": 5, "tools": [], "actions": {}, "timin
           "new_session": False, "previous_id": None}
 
 
+def tool_then(error, name="get_weather", args='{"place": "Rajkot"}'):
+    """A stand-in for gemini.chat_stream: the first round asks for a tool, the next one fails with `error`."""
+    calls = []
+
+    def fake(messages, tools=None, **kw):
+        calls.append(1)
+
+        def gen():
+            if len(calls) == 1:
+                yield ("end", {"role": "assistant", "content": "", "tool_calls": [tool_call(name, args)]})
+            else:
+                raise error
+        return gen()
+
+    return fake, calls
+
+
 class FakeTTS:
     def __init__(self, voice):
         self.voice = voice
         self.name = voice.name
+        self.up = True
+
+    def filler_ok(self):
+        return self.up
 
     def session(self, cond=None):
         return SpeechSession([self.voice], parallel=3, cond=cond)
@@ -178,6 +199,18 @@ class Streamed(Base):
         self.assertEqual(calls[1]["messages"][-2]["tool_calls"][0]["extra_content"],
                          {"google": {"thought_signature": "SIG"}})
 
+    def test_no_filler_when_the_voice_looks_down(self):
+        self.assistant.tts.up = False
+        call = tool_call("get_weather", '{"place": "Rajkot"}')
+        round1 = [("end", {"role": "assistant", "content": "", "tool_calls": [call]})]
+        round2 = [("text", "It is thirty one degrees in Rajkot."), END]
+        with mock.patch("weather.is_cached", return_value=False), \
+                mock.patch("weather.get_weather", return_value={"temp": 31}):
+            (status, body), _ = self.stream(round1, round2)
+        f = frames.parse(body)
+        self.assertEqual(f["text"], "It is thirty one degrees in Rajkot.")
+        self.assertEqual(f["audio"], self.audio_of("It is thirty one degrees in Rajkot."))
+
     def test_the_filler_can_be_turned_off(self):
         call = tool_call("get_weather", '{"place": "Rajkot"}')
         round1 = [("end", {"role": "assistant", "content": "", "tool_calls": [call]})]
@@ -274,6 +307,28 @@ class Switching(Base):
             self.assertEqual(seen, [])                          # not even tried any more
             self.assertEqual(frames.parse(body)["text"], "Legacy answer.")
 
+    def test_a_failure_the_normal_path_shares_is_not_blamed_on_streaming(self):
+        def broken(*a, **k):
+            raise RuntimeError("a bug")
+
+        def also_broken(*a, **k):
+            raise RuntimeError("the database is down")
+
+        self.assistant.think = also_broken
+        (status, body), _ = self.stream(patch=broken)
+        self.assertEqual(status, 500)
+        self.assertEqual(self.assistant.stream_fails, 0)       # the normal way fails too: not streaming's fault
+
+    def test_tools_that_have_run_are_not_run_again_by_the_fallback(self):
+        fake, _ = tool_then(RuntimeError("a bug"))
+        with mock.patch("weather.is_cached", return_value=True), \
+                mock.patch("weather.get_weather", return_value={"temp": 31}) as weather:
+            (status, body), _ = self.stream(patch=fake)
+        self.assertEqual(status, 500)
+        self.assertEqual(weather.call_count, 1)
+        self.assertEqual(self.assistant.legacy_calls, [])      # asking the question again would repeat the tools
+        self.assertEqual(self.assistant.stream_fails, 0)
+
     def test_a_good_streamed_turn_resets_the_count(self):
         self.assistant.stream_fails = 2
         (status, body), _ = self.stream([("text", "It is sunny today."), END])
@@ -308,6 +363,42 @@ class Errors(Base):
         data = json.loads(body)
         self.assertTrue(data["error"].startswith("voice:"))
         self.assertEqual(data["reply"], "It is sunny today.")
+
+    def test_a_filler_nobody_can_say_and_then_a_failed_turn_still_gets_an_answer(self):
+        """The filler counts as decided, but no voice could say it: nothing reached the speaker, so it has to be
+        told what went wrong instead of being left to wait for a reply that is never coming."""
+        for line in server.FILLERS:
+            self.voice.fail[line] = RuntimeError("no voice installed")
+        fake, _ = tool_then(gemini.GeminiError("quota exceeded", 429))
+        with mock.patch("weather.is_cached", return_value=False), \
+                mock.patch("weather.get_weather", return_value={"temp": 31}):
+            (status, body), _ = self.stream(patch=fake)
+        self.assertEqual(status, 429)
+        self.assertIn("quota exceeded", json.loads(body)["error"])
+
+    def test_a_voice_that_dies_part_way_ends_the_reply_and_stops_gemini(self):
+        self.voice.fail["Two two two."] = RuntimeError("edge voice failed")
+        gate = threading.Event()
+        read_to_the_end = []
+
+        def slow(messages, tools=None, **kw):
+            def gen():
+                yield ("text", "One one one. Two two two. Three three three. ")
+                gate.wait(5)                                    # Gemini is still writing when the voice breaks
+                yield ("text", "Four four four.")
+                yield END
+                read_to_the_end.append(True)
+            return gen()
+
+        with mock.patch.object(config, "STREAM_HOLD_MS", 100), mock.patch.object(gemini, "chat_stream", slow):
+            status, body = self.say()
+            gate.set()
+            self.assertTrue(wait_until(lambda: not self.assistant.turn_lock.locked()))
+        self.assertEqual(status, 200)
+        self.assertEqual(frames.parse(body)["audio"], self.audio_of("One one one."))
+        self.assertEqual(read_to_the_end, [])                   # Gemini was stopped, not read to the end
+        self.assertEqual(self.assistant.legacy_calls, [])
+        self.assertEqual(self.assistant.stream_fails, 0)
 
     def test_a_failure_after_the_reply_has_started_ends_it_with_an_apology(self):
         def breaks(messages, tools=None, **kw):

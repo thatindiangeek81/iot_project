@@ -12,7 +12,9 @@ for `hold_s` (a long answer shouldn't keep the speaker waiting). From then on th
 this turn: music_ok() says so, and the brain tells Gemini.
 
 While a slow tool runs (a web search, a weather lookup that isn't cached) there is nothing to say yet, so a
-short line like "One sec, boss." goes out at once instead of silence.
+short line like "One sec, boss." goes out at once instead of silence. Not if the voice that line would come
+from looks unreachable (filler_ok): it comes from the voice cache, which makes that voice the voice of the whole
+reply, and a reply that can't go on after its first line is worse than a short silence.
 
 The reply is sent through a `transport`: begin() starts the HTTP response, write(bytes) sends a piece of
 the body, end() finishes it.
@@ -33,7 +35,7 @@ class StreamingReply:
     """The sink for Brain.answer_stream() that actually talks to the speaker."""
 
     def __init__(self, session, transport, build_header, get_actions, *, offset_ms: int = 0, hold_s: float = 1.5,
-                 fillers=(), apology: str = "", clock=time.monotonic) -> None:
+                 fillers=(), apology: str = "", filler_ok=None, clock=time.monotonic) -> None:
         """build_header(voice, text, chat_ms, tts_ms, actions) -> the frame header bytes.
         get_actions() -> the music action the speaker is to be given. offset_ms is how long the speaker
         has been waiting already (hearing it), so the times we report are from the end of its question."""
@@ -46,6 +48,7 @@ class StreamingReply:
         self._hold_s = hold_s
         self._fillers = list(fillers)
         self._apology = apology
+        self._filler_ok = filler_ok            # () -> bool: is it all right to start with a line from the cache?
         self._clock = clock
         self._t0 = clock()
 
@@ -58,6 +61,7 @@ class StreamingReply:
         self._failed = False                   # it failed before anything was sent
         self._decided = False                  # the reply has begun (or is about to)
         self._voice_dead = False               # no voice could make the first sentence
+        self._stopped = False                  # the voice failed part way through the reply: it is over
         self._thread: threading.Thread | None = None
 
         self.dead = False                      # the speaker hung up
@@ -65,6 +69,7 @@ class StreamingReply:
         self.voice = None                      # the voice that is speaking
         self.voice_error: Exception | None = None
         self.filler: str | None = None
+        self.tools_ran = False                 # a round ended in tool calls: they have run, or are about to
         self.first_audio_ms: int | None = None      # from the end of the question to the first audio sent
         self.answer_ms: int | None = None           # ... to the first audio of the answer itself (not the filler)
         self.chat_ms: int | None = None
@@ -75,7 +80,7 @@ class StreamingReply:
 
     def sentence(self, text: str) -> None:
         with self.cv:
-            if self.dead or self._voice_dead:
+            if self.dead or self._voice_dead or self._stopped:
                 return
             now = self._clock()
             if not self._draft:
@@ -94,13 +99,15 @@ class StreamingReply:
                 return
             # A round that ended in a tool call isn't the answer: whatever it said before the call is dropped,
             # unless it has already started to go out.
+            self.tools_ran = True
             if self._decided:
                 self._spoken += self._draft
             else:
                 self.session.drop_unsent()
             self._draft = []
             self._t_draft = None
-            if slow and not self._decided and self._fillers and not (self.dead or self._voice_dead):
+            if (slow and not self._decided and self._fillers and not (self.dead or self._voice_dead)
+                    and (self._filler_ok is None or self._filler_ok())):
                 line = self._pick_filler()
                 if self.session.add(line, tag=FILLER):
                     self._spoken.append(line)
@@ -109,7 +116,9 @@ class StreamingReply:
             self.cv.notify_all()
 
     def cancelled(self) -> bool:
-        return self.dead
+        """The brain asks this between chunks: stop if nobody can hear the rest (the speaker hung up, or the voice
+        failed part way through). A voice that never worked at all is not this: the caller still wants the text."""
+        return self.dead or self._stopped
 
     def music_ok(self) -> bool:
         with self.cv:
@@ -137,7 +146,7 @@ class StreamingReply:
                 self._failed = True             # nothing has been sent: the caller can still answer with an error
                 self.session.abort()
             else:
-                if self._apology and not (self.dead or self._voice_dead):
+                if self._apology and not (self.dead or self._voice_dead or self._stopped):
                     self.session.add(self._apology)     # don't leave the speaker with a sentence cut short
                 self.session.close()
             self.cv.notify_all()
@@ -220,9 +229,12 @@ class StreamingReply:
                     self.answer_ms = self._since_start_ms()
                 self.audio += data
             if self.started:
-                self._transport.end()
                 if self.session.error is not None:
                     print(f"[tts] stopped mid-reply: {self.session.error}")
+                    with self.cv:
+                        self._stopped = True            # nobody can hear the rest: stop Gemini and the voice,
+                    self.session.abort()                # and do it before the speaker is told the reply is over
+                self._transport.end()
         except Exception as exc:               # the speaker hung up (broken pipe), or the connection dropped
             self.dead = True
             self.session.abort()
