@@ -24,6 +24,7 @@ import numpy as np
 
 import config
 from audio_utils import bytes_to_pcm, load_wav, resample
+from speech import Stop
 
 
 class TTSError(RuntimeError):
@@ -137,6 +138,7 @@ class _EdgeVoice:
 
     provider = PROVIDER_EDGE
     fmt = "mp3"
+    _up = True                         # did the last live request to Microsoft work? (none made yet: yes)
 
     def __init__(self) -> None:
         try:
@@ -144,6 +146,14 @@ class _EdgeVoice:
         except ImportError as exc:
             raise TTSError("edge-tts is not installed (pip install edge-tts)") from exc
         self.name = f"edge {config.EDGE_VOICE}"
+
+    def looks_up(self) -> bool:
+        """Does Microsoft's service look reachable? Only live requests tell: a line from the voice cache doesn't."""
+        return self._up
+
+    def stalled(self) -> None:
+        """A request went unanswered for too long and was given up on: treat the service as down until one works."""
+        self._up = False
 
     def audio(self, text: str) -> bytes:
         import asyncio
@@ -162,14 +172,68 @@ class _EdgeVoice:
         try:
             data = asyncio.run(asyncio.wait_for(run(), timeout=config.EDGE_TIMEOUT))
         except asyncio.TimeoutError:
+            self._up = False
             raise TTSError("edge voice timed out") from None
         except TTSError:
+            self._up = False
             raise
         except Exception as exc:  # network down, service changed...
+            self._up = False
             raise TTSError(f"edge voice failed: {exc}") from None
         if len(data) < 200:
+            self._up = False
             raise TTSError("edge voice returned no audio")
+        self._up = True
         return data
+
+    def speak(self, text: str, put) -> None:
+        """Say `text` for a SpeechSession: a line said before comes from the voice cache, anything else
+        from Microsoft, handed to put() as it arrives. Runs in the calling thread."""
+        cached = _cache_get(text)
+        if cached:
+            put(cached)
+            return
+        keep = [] if _cache_path(text) else None
+
+        def forward(data: bytes) -> None:
+            if keep is not None:
+                keep.append(data)
+            put(data)
+
+        self._synth_into(text, forward)
+        if keep:
+            _cache_store(text, b"".join(keep))      # short lines are kept for next time
+
+    def _synth_into(self, text: str, put) -> None:
+        import asyncio
+
+        import edge_tts
+
+        async def run() -> None:
+            com = edge_tts.Communicate(for_neural_voice(text), config.EDGE_VOICE, rate=config.EDGE_RATE,
+                                       pitch=config.EDGE_PITCH)
+            got = 0
+            async for chunk in com.stream():
+                if chunk.get("type") == "audio" and chunk.get("data"):
+                    got += len(chunk["data"])
+                    put(chunk["data"])
+            if got < 200:
+                raise TTSError("edge voice returned no audio")
+
+        try:
+            asyncio.run(asyncio.wait_for(run(), timeout=config.EDGE_TIMEOUT + 30))
+        except Stop:
+            raise                              # the sentence wasn't wanted any more: says nothing about the service
+        except asyncio.TimeoutError:
+            self._up = False
+            raise TTSError("edge voice timed out") from None
+        except TTSError:
+            self._up = False
+            raise
+        except Exception as exc:  # network down, service changed...
+            self._up = False
+            raise TTSError(f"edge voice failed: {exc}") from None
+        self._up = True
 
     def _start(self, text: str):
         """Begin synthesising `text` in the background; returns the queue its MP3 chunks arrive on."""
@@ -234,6 +298,7 @@ class _EdgeVoice:
 
 
 _DONE = object()
+_LOCAL_LOCK = threading.Lock()     # the laptop's own voices make one sentence at a time
 
 
 def split_first_sentence(text: str, min_chars: int = 12) -> tuple[str, str]:
@@ -262,6 +327,10 @@ class _Local:
 
     def audio(self, text: str) -> bytes:
         return self.pcm(text).astype("<i2").tobytes()
+
+    def speak(self, text: str, put) -> None:
+        with _LOCAL_LOCK:
+            put(self.audio(text))
 
 
 # ---------------------------------------------------------------- voice cache
@@ -408,6 +477,20 @@ class TTS:
                 errors.append(f"{backend.name}: {exc}")
                 print(f"[tts] {backend.name} failed ({exc}); trying the next voice")
         raise TTSError("; ".join(errors))
+
+    def filler_ok(self) -> bool:
+        """May a reply begin with a line from the voice cache? Such a line comes from Edge, and then Edge has to
+        say the rest of the reply too (MP3 and PCM can't be mixed): if it looks unreachable, better to start
+        with whichever voice does work."""
+        chain = self.chain()
+        check = getattr(chain[0], "looks_up", None) if chain else None
+        return True if check is None else bool(check())
+
+    def session(self, cond=None):
+        """A SpeechSession: add() sentences as they are written and read their audio back in order."""
+        from speech import SpeechSession
+
+        return SpeechSession(self.chain(), parallel=config.TTS_PARALLEL, cond=cond)
 
     def first(self, text: str) -> tuple:
         """Voice the first sentence with the first backend that works.

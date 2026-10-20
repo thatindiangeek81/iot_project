@@ -14,7 +14,7 @@ __pycache__/
 server/last_question.wav
 server/last_reply.wav
 server/last_reply.mp3
-server/latency.log
+server/latency*.log
 server/voice_cache/
 server/music_cache/
 server/.songlist.txt
@@ -35,3 +35,6 @@ worker/.wrangler/
 .idea/
 .DS_Store
 Thumbs.db
+
+# --- the original Cortex project: its own git repo (and its backend/.env.bak holds a real password) ---
+Cortex/

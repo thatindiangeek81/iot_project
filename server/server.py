@@ -32,11 +32,15 @@ import config
 import frames
 import music
 from audio_utils import bytes_to_pcm, load_wav, normalize, resample, save_wav, split_sentences
+from replystream import StreamingReply
 
 HERE = Path(__file__).resolve().parent
 NOT_HEARD_REPLY = "Sorry, I didn't catch that. Could you say it again?"
+# Said while a slow tool runs (web search, weather), and when a streamed reply breaks off half way
+FILLERS = ["One sec, boss.", "Let me check.", "Checking that now.", "Just a moment.", "On it, boss."]
+ERROR_LINE = "Sorry, something went wrong, boss."
 QUICK_LINES = (["Paused.", "Back on.", "Stopped.", "It's already playing.", "Nothing was playing.", "From the top.",
-                NOT_HEARD_REPLY] + [f"Volume {n} percent." for n in range(0, 101, 5)])
+                NOT_HEARD_REPLY, ERROR_LINE] + FILLERS + [f"Volume {n} percent." for n in range(0, 101, 5)])
 MAX_BODY = config.MAX_AUDIO_SECONDS * config.SAMPLE_RATE * 2 + 64 * 1024
 CHUNK = 16 * 1024
 
@@ -61,6 +65,8 @@ class Assistant:
         from tts import TTS
 
         self.turn_lock = threading.Lock()      # one turn at a time: there is one speaker
+        self.stream_fails = 0                  # streamed turns in a row that broke before sending anything and
+                                               # were then answered the normal way
         self.memory = Memory()
         self.brain = Brain(self.memory)
         self.background = Background()
@@ -78,6 +84,8 @@ class Assistant:
             from stt import STT
 
             self.stt = STT()
+            if config.STT_WARMUP:
+                self.stt.warmup()
 
     # ------------------------------------------------------------ pieces
 
@@ -99,12 +107,33 @@ class Assistant:
         except gemini.GeminiError as exc:
             raise TurnError(str(exc), exc.status, heard=heard) from None
 
+    def stream_enabled(self) -> bool:
+        return config.STREAM_REPLIES and self.stream_fails < config.STREAM_MAX_FAILS
+
+    def think_stream(self, heard: str, music_state: str | None, sink) -> dict:
+        """think(), but each sentence goes to `sink` while Gemini is still writing the rest."""
+        import gemini
+
+        jb = self.jukebox if self.jukebox and self.jukebox.observe(music_state) else None
+        try:
+            return self.brain.answer_stream(heard, jb, sink)
+        except gemini.GeminiError as exc:
+            raise TurnError(str(exc), exc.status, heard=heard) from None
+
     def voice_start(self, reply: str) -> tuple:
         """(backend, first audio bytes, rest iterator, ms); raises TTSError."""
         return self.tts.start(reply)
 
     def after_turn(self, heard: str, result: dict) -> None:
         """Log the exchange now (fast), learn from it later (slow, background)."""
+        cx = result.get("cortex")
+        if heard and cx:                                        # a document answer: for "Recent answers"
+            import cortex
+
+            if cortex.should_log(result):                       # cited something, nothing failed
+                latency = dict(cx.get("latency") or {})
+                latency["first_audio_ms"] = (result.get("timing") or {}).get("first_audio_ms")
+                cortex.queue_answer(heard, result["reply"], result.get("citations") or [], cx.get("mode"), latency)
         if not heard or not result.get("episode_id"):
             return
         try:
@@ -148,9 +177,32 @@ def read_audio(body: bytes) -> np.ndarray:
     return pcm
 
 
+class _HttpTransport:
+    """How a StreamingReply writes its response: a chunked 200, started when the first audio is ready."""
+
+    def __init__(self, handler: "Handler") -> None:
+        self.h = handler
+
+    def begin(self) -> None:
+        h = self.h
+        h.send_response(200)
+        h.send_header("Content-Type", "application/octet-stream")
+        h.send_header("Transfer-Encoding", "chunked")
+        h.end_headers()
+
+    def write(self, data: bytes) -> None:
+        self.h._chunk(data)
+
+    def end(self) -> None:
+        self.h.wfile.write(b"0\r\n\r\n")
+        self.h.wfile.flush()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"          # keep-alive: the S3 reuses one connection
     server_version = "friday-local/1.0"
+    disable_nagle_algorithm = True         # TCP_NODELAY: a small write (the header, the end of a sentence) goes out
+                                           # now, not after the S3 has got round to acknowledging the one before
     assistant: Assistant = None            # set in main()
 
     def log_message(self, fmt, *args) -> None:   # quiet; turns print their own summary
@@ -172,12 +224,14 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"{len(part):X}\r\n".encode() + part + b"\r\n")
         self.wfile.flush()
 
-    def _stream(self, header: bytes, first: bytes, rest, backend) -> bytes:
+    def _stream(self, header: bytes, first: bytes, rest, backend, citations=None) -> bytes:
         """Send the frame header with the first audio straight away, then the
         rest of the reply (same voice) as soon as each piece is ready."""
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Transfer-Encoding", "chunked")
+        if citations:
+            self.send_header("X-Citations", _citations_header(citations))
         self.end_headers()
         sent = [first]
         self._chunk(header + first)
@@ -211,7 +265,8 @@ class Handler(BaseHTTPRequestHandler):
         jb = a.jukebox
         self._json({"ok": True, "server": "friday-local", "model": config.GEMINI_MODEL,
                     "voice": a.tts.name, "stt": config.WHISPER_MODEL if a.stt else None,
-                    "facts": a.memory.count_facts(), "web_search": config.WEB_SEARCH,
+                    "facts": a.memory.count_facts(), "web_search": config.WEB_SEARCH, "stream": a.stream_enabled(),
+                    "documents": _documents_health(),
                     "music": {"songs": jb.count(), "ffmpeg": bool(jb.ffmpeg)} if jb else None})
 
     # ------------------------------------------------------------ music
@@ -387,32 +442,139 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             raise TurnError(f"voice: {exc}", 502, reply=reply, **extra) from None
 
-    def _header(self, heard: str | None, result: dict, backend, tts_ms: int, stt_ms: int) -> bytes:
+    def _frame(self, heard: str | None, text: str, chat_ms: int, actions: dict | None, backend, tts_ms: int,
+               stt_ms: int) -> bytes:
         """I2S4 (with the music action) for speakers that can play music, else the old frames."""
         if self.music_state is not None:
-            return frames.reply_header(heard, result["reply"], backend.provider, result["ms"], tts_ms, stt_ms,
-                                       backend.fmt, result.get("actions"))
+            return frames.reply_header(heard, text, backend.provider, chat_ms, tts_ms, stt_ms, backend.fmt, actions)
         if heard is None:
-            return frames.say_header(result["reply"], backend.provider, result["ms"], tts_ms, backend.fmt)
-        return frames.ask_header(heard, result["reply"], backend.provider, result["ms"], tts_ms, stt_ms, backend.fmt)
+            return frames.say_header(text, backend.provider, chat_ms, tts_ms, backend.fmt)
+        return frames.ask_header(heard, text, backend.provider, chat_ms, tts_ms, stt_ms, backend.fmt)
+
+    def _header(self, heard: str | None, result: dict, backend, tts_ms: int, stt_ms: int) -> bytes:
+        return self._frame(heard, result["reply"], result["ms"], result.get("actions"), backend, tts_ms, stt_ms)
+
+    # ------------------------------------------------------------ a reply that starts while Gemini is still writing
+
+    def _wants_stream(self) -> bool:
+        """An X-Stream: 0 or 1 header on the request decides (that's how the two ways are compared);
+        otherwise STREAM_REPLIES, unless streaming has broken too often in a row and switched itself off."""
+        flag = (self.headers.get("X-Stream") or "").strip().lower()
+        if flag:
+            return flag not in ("0", "false", "no", "off")
+        return self.assistant.stream_enabled()
+
+    def _turn_streamed(self, heard: str, stt_ms: int, typed: bool) -> bool:
+        """Answer `heard` with the audio starting while Gemini is still writing.
+
+        True: the turn is dealt with (answered, or failed with an error the caller has been given).
+        False: the streamed path broke before it had sent anything; answer the normal way instead."""
+        from brain import TurnCancelled
+
+        a = self.assistant
+        shown = None if typed else heard
+        reply = StreamingReply(
+            a.tts.session(), _HttpTransport(self),
+            lambda voice, text, chat_ms, tts_ms, actions: self._frame(shown, text, chat_ms, actions, voice, tts_ms,
+                                                                      stt_ms),
+            a.brain.actions, offset_ms=int((time.time() - self.t_start) * 1000),
+            hold_s=config.STREAM_HOLD_MS / 1000.0, fillers=FILLERS if config.TOOL_FILLER else (),
+            apology=ERROR_LINE, filler_ok=a.tts.filler_ok)
+        reply.start()
+        try:
+            try:
+                result = a.think_stream(heard, self.music_state, reply)
+            except TurnCancelled:
+                print("[turn] the speaker hung up mid-reply" if reply.dead
+                      else "[turn] the voice stopped mid-reply, so Gemini was stopped too")
+                return True
+            except TurnError as exc:
+                reply.finish(error=exc)
+                reply.wait()
+                if reply.dead:
+                    print("[turn] the speaker hung up mid-reply")
+                    return True
+                if not reply.started:
+                    raise                      # nothing reached the speaker: the caller answers with the error
+                print(f"[turn] failed after the reply had started: {exc}")
+                return True
+            except Exception as exc:
+                reply.finish(error=exc)
+                reply.wait()
+                if reply.dead or reply.started:
+                    print(f"[turn] the streamed reply broke after it had started: {type(exc).__name__}: {exc}")
+                    return True
+                if reply.tools_ran:
+                    raise                      # the tools have run: asking the question again would repeat them
+                print(f"[stream] broke before sending anything ({type(exc).__name__}: {exc}); "
+                      f"answering the normal way")
+                return False
+            reply.finish()
+            reply.wait()
+        finally:
+            reply.close()
+
+        if not reply.started and not reply.dead:       # nothing could be said, so the speaker gets the text
+            raise TurnError(f"voice: {reply.voice_error or 'nothing was said'}", 502, reply=result["reply"],
+                            action=result.get("actions") or {}, **({} if typed else {"heard": heard}))
+        a.stream_fails = 0
+        if reply.dead:
+            print("[turn] the speaker hung up mid-reply")
+        else:
+            timing = result.get("timing") or {}
+            timing["first_audio_ms"] = reply.first_audio_ms
+            _latency("typed" if typed else "spoken", heard, stt_ms, result, reply.tts_ms or 0,
+                     reply.first_audio_ms or 0,
+                     {"first_sentence_ms": timing.get("first_sentence_ms"), "ttft_ms": timing.get("ttft_ms"),
+                      "hedged": timing.get("hedged"), "filler": reply.filler, "answer_ms": reply.answer_ms})
+            print(f"[turn] {'typed' if typed else 'heard'} \"{heard}\" | "
+                  f"{'' if typed else f'Whisper {stt_ms} ms | '}Gemini {result['ms']} ms {_tools(result)}| "
+                  f"{reply.voice.name} {reply.tts_ms} ms (streamed)\nfriday> {result['reply']}{_action(result)}"
+                  f"{_cites(result)}")
+            _save_reply(bytes(reply.audio), reply.voice.fmt)
+        self._after(heard, result)
+        return True
+
+    def _stream_failed(self) -> None:
+        """A streamed turn broke before it sent anything, and the normal way has now answered the same question:
+        that points at streaming. Enough of these in a row and it switches itself off."""
+        a = self.assistant
+        a.stream_fails += 1
+        if not a.stream_enabled():
+            print("[stream] this keeps happening; streaming is off until the server is restarted")
+
+    def _after(self, heard: str, result: dict) -> None:
+        """Log the exchange and learn from it, unless the request says it's a test (X-No-Log: 1):
+        the benchmark asks dozens of questions and shouldn't fill the history and the memory with them."""
+        if (self.headers.get("X-No-Log") or "").strip() == "1":
+            return
+        self.assistant.after_turn(heard, result)
 
     def _chat(self, text: str) -> None:
         result = self.assistant.think(text, self.music_state)
         self._json({"reply": result["reply"], "ms": result["ms"], "tools": [t["tool"] for t in result["tools"]],
-                    "action": result.get("actions") or {}})
-        print(f"[turn] typed \"{text}\" -> {result['reply']}")
-        self.assistant.after_turn(text, result)
+                    "action": result.get("actions") or {}, "citations": result.get("citations") or []})
+        print(f"[turn] typed \"{text}\" -> {result['reply']}{_cites(result)}")
+        self._after(text, result)
 
     def _say(self, text: str) -> None:
+        fell_back = False
+        if self._wants_stream():
+            if self._turn_streamed(text, 0, typed=True):
+                return
+            fell_back = True
         result = self.assistant.think(text, self.music_state)
+        if fell_back:
+            self._stream_failed()
         backend, first, rest, tts_ms = self._first_voice(result["reply"], action=result.get("actions") or {})
         header = self._header(None, result, backend, tts_ms, 0)
-        audio = self._stream(header, first, rest, backend)
+        audio = self._stream(header, first, rest, backend, result.get("citations"))
+        (result.get("timing") or {})["first_audio_ms"] = self.first_audio_ms
         _latency("typed", text, 0, result, tts_ms, self.first_audio_ms)
         print(f"[turn] typed \"{text}\" | Gemini {result['ms']} ms {_tools(result)}| {backend.name} {tts_ms} ms\n"
-              f"friday> {result['reply']}{_action(result)}")
+              f"friday> {result['reply']}{_action(result)}{_cites(result)}")
         _save_reply(audio, backend.fmt)
-        self.assistant.after_turn(text, result)
+        self._after(text, result)
 
     def _ask(self, body: bytes, debug: bool) -> None:
         a = self.assistant
@@ -420,44 +582,100 @@ class Handler(BaseHTTPRequestHandler):
         _save("last_question.wav", pcm)
         heard, raw, stt_ms = a.hear(pcm)
 
+        fell_back = False
+        if heard and not debug and self._wants_stream():
+            if self._turn_streamed(heard, stt_ms, typed=False):
+                return
+            fell_back = True
+
         result = {"reply": NOT_HEARD_REPLY, "ms": 0, "tools": [], "actions": {}}
         if heard:
             result = a.think(heard, self.music_state)
+            if fell_back:
+                self._stream_failed()
 
         if debug:
             self._json({"heard": heard, "raw_transcript": raw, "reply": result["reply"], "stt_ms": stt_ms,
-                        "chat_ms": result["ms"], "tools": result["tools"],
+                        "chat_ms": result["ms"], "tools": result["tools"], "citations": result.get("citations") or [],
                         "seconds": round(pcm.size / config.SAMPLE_RATE, 2)})
         else:
             backend, first, rest, tts_ms = self._first_voice(result["reply"], heard=heard,
                                                              action=result.get("actions") or {})
             header = self._header(heard, result, backend, tts_ms, stt_ms)
-            audio = self._stream(header, first, rest, backend)
+            audio = self._stream(header, first, rest, backend, result.get("citations"))
+            if result.get("timing") is not None:
+                result["timing"]["first_audio_ms"] = self.first_audio_ms
             _latency("spoken", heard, stt_ms, result, tts_ms, self.first_audio_ms)
             _save_reply(audio, backend.fmt)
             print(f"[turn] heard \"{heard or '(nothing clear)'}\" | Whisper {stt_ms} ms | Gemini {result['ms']} ms "
-                  f"{_tools(result)}| {backend.name} {tts_ms} ms\nfriday> {result['reply']}{_action(result)}")
-        a.after_turn(heard, result)
+                  f"{_tools(result)}| {backend.name} {tts_ms} ms\nfriday> {result['reply']}{_action(result)}"
+                  f"{_cites(result)}")
+        self._after(heard, result)
 
 
-def _latency(kind: str, said: str, stt_ms: int, result: dict, tts_ms: int, first_audio_ms: int) -> None:
-    """Where the time went, on the console and as one line in latency.log."""
+LATENCY_COLUMNS = ("time", "kind", "first_audio_ms", "stt_ms", "prompt_ms", "gemini_ms", "tool_ms", "tts_ms", "quick",
+                   "stream", "first_sentence_ms", "ttft_ms", "hedged", "filler", "answer_ms",
+                   "rag_mode", "rag_ms", "embed_ms", "search_ms", "said")
+
+
+def _latency(kind: str, said: str, stt_ms: int, result: dict, tts_ms: int, first_audio_ms: int,
+             stream: dict | None = None) -> None:
+    """Where the time went, on the console and as one line in latency.log.
+    `stream` is given for a reply that started while Gemini was still writing."""
     t = result.get("timing") or {}
     rounds = t.get("gemini_ms") or []
-    line = (f"[latency] {first_audio_ms} ms to first audio = hearing {stt_ms} + memory/prompt "
-            f"{t.get('prompt_ms', 0)} + Gemini {'+'.join(map(str, rounds)) or 0}"
-            f"{' (quick reply)' if t.get('fast') else ''} + tools {t.get('tool_ms', 0)} + voice {tts_ms}")
+    gemini = "+".join(map(str, rounds)) or "0"
+    s = stream or {}
+    if stream is None:
+        line = (f"[latency] {first_audio_ms} ms to first audio = hearing {stt_ms} + memory/prompt "
+                f"{t.get('prompt_ms', 0)} + Gemini {gemini}"
+                f"{' (quick reply)' if t.get('fast') else ''} + tools {t.get('tool_ms', 0)} + voice {tts_ms}")
+    elif s.get("filler"):
+        # The first audio was the filler line, said once Gemini's first round (the one that asked for the tool)
+        # was over; the first sentence of the answer came after the tool.
+        line = (f"[latency] {first_audio_ms} ms to first audio (streamed, the filler {s['filler']!r}) = hearing "
+                f"{stt_ms} + memory/prompt {t.get('prompt_ms', 0)} + Gemini's first round "
+                f"{rounds[0] if rounds else 0} + voice {tts_ms}; the answer itself from {s.get('answer_ms')} ms "
+                f"(Gemini {s.get('first_sentence_ms')} to its first sentence, first word {s.get('ttft_ms')}"
+                f"{', retried' if s.get('hedged') else ''}); Gemini {gemini} and tools {t.get('tool_ms', 0)} in all")
+    else:
+        held = first_audio_ms - stt_ms - (s.get("first_sentence_ms") or 0) - tts_ms
+        line = (f"[latency] {first_audio_ms} ms to first audio (streamed) = hearing {stt_ms} + Gemini "
+                f"{s.get('first_sentence_ms')} to the first sentence (memory/prompt {t.get('prompt_ms', 0)}, "
+                f"first word {s.get('ttft_ms')}{', retried' if s.get('hedged') else ''}) + voice {tts_ms}")
+        if held > 150:                      # the reply waited to see whether a tool call followed (or for a voice)
+            line += f" + held back {held}"
+        line += (f"; the answer itself from {s.get('answer_ms')} ms; "
+                 f"Gemini {gemini} and tools {t.get('tool_ms', 0)} in all")
+    if t.get("rag_mode"):
+        where = "before Gemini, not in memory/prompt" if t["rag_mode"] == "inject" else "inside tools"
+        line += (f"; documents ({t['rag_mode']}) waited {t.get('rag_ms', 0)} ms {where} "
+                 f"[embed {_ms(t.get('embed_ms'))}, search {'-' if t.get('search_ms') is None else t['search_ms']} ms]")
     print(line)
     if not config.LATENCY_LOG:
         return
+    row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind, "first_audio_ms": first_audio_ms,
+           "stt_ms": stt_ms, "prompt_ms": t.get("prompt_ms", 0), "gemini_ms": "+".join(map(str, rounds)),
+           "tool_ms": t.get("tool_ms", 0), "tts_ms": tts_ms, "quick": int(bool(t.get("fast"))),
+           "stream": int(stream is not None), "first_sentence_ms": s.get("first_sentence_ms"),
+           "ttft_ms": s.get("ttft_ms"), "hedged": int(bool(s.get("hedged"))) if stream is not None else "",
+           "filler": int(bool(s.get("filler"))) if stream is not None else "", "answer_ms": s.get("answer_ms"),
+           "rag_mode": t.get("rag_mode") or "", "rag_ms": t.get("rag_ms") if t.get("rag_mode") else None,
+           "embed_ms": t.get("embed_ms"), "search_ms": t.get("search_ms"),
+           "said": (said or "")[:80].replace("\t", " ")}
     try:
-        new = not (HERE / "latency.log").exists()
-        with open(HERE / "latency.log", "a", encoding="utf-8") as f:
+        path = HERE / "latency.log"
+        header = "\t".join(LATENCY_COLUMNS)
+        if path.exists():
+            with open(path, encoding="utf-8") as f:
+                if f.readline().rstrip("\n") != header:      # an older log with other columns: keep it aside
+                    f.close()
+                    path.replace(HERE / f"latency.{time.strftime('%Y%m%d-%H%M%S')}.log")
+        new = not path.exists()
+        with open(path, "a", encoding="utf-8") as f:
             if new:
-                f.write("time\tkind\tfirst_audio_ms\tstt_ms\tprompt_ms\tgemini_ms\ttool_ms\ttts_ms\tquick\tsaid\n")
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\t{kind}\t{first_audio_ms}\t{stt_ms}\t"
-                    f"{t.get('prompt_ms', 0)}\t{'+'.join(map(str, rounds))}\t{t.get('tool_ms', 0)}\t{tts_ms}\t"
-                    f"{int(bool(t.get('fast')))}\t{(said or '')[:80]}\n")
+                f.write(header + "\n")
+            f.write("\t".join("" if row[c] is None else str(row[c]) for c in LATENCY_COLUMNS) + "\n")
     except OSError:
         pass
 
@@ -465,6 +683,42 @@ def _latency(kind: str, said: str, stt_ms: int, result: dict, tts_ms: int, first
 def _action(result: dict) -> str:
     act = result.get("actions")
     return f"\n[action] {json.dumps(act, ensure_ascii=False)}" if act else ""
+
+
+def _ms(value) -> str:
+    """An embedding time: 0 means it came from the cache."""
+    return "cached" if value == 0 else ("-" if value is None else f"{value} ms")
+
+
+def _cites(result: dict) -> str:
+    """The console line under a document answer: which passages it used."""
+    cx = result.get("cortex")
+    if not cx:
+        return ""
+    if cx.get("error"):
+        return f"\n[cortex] {cx.get('mode')}: no documents ({cx['error']})"
+    cites = result.get("citations") or []
+    if not cites:
+        if cx.get("passages"):
+            return f"\n[cortex] {cx.get('mode')}: {cx['passages']} passage(s) given, none cited (not saved)"
+        return f"\n[cortex] {cx.get('mode')}: nothing in the documents matched"
+    return f"\n[cortex] {cx.get('mode')}: " + "; ".join(
+        f"[{c['n']}] {c['filename']}" + (f" p.{c['page']}" if c.get("page") else "") + f" ({c['similarity']:.2f})"
+        for c in cites)
+
+
+def _citations_header(citations: list) -> str:
+    """X-Citations on a /say or /ask reply that wasn't streamed: compact ASCII JSON (a header can't be long).
+    A streamed reply's headers leave before the answer exists: its citations show in the console and on the
+    hosted page (cortex.answers) only."""
+    short = [{"n": c.get("n"), "document_id": c.get("document_id"), "filename": c.get("filename"),
+              "page": c.get("page"), "chunk_id": c.get("chunk_id")} for c in citations]
+    while short:
+        text = json.dumps(short, ensure_ascii=True, separators=(",", ":"))
+        if len(text) <= 1500:
+            return text
+        short = short[:-1]
+    return "[]"
 
 
 def _bitrate_bytes() -> float:
@@ -562,7 +816,7 @@ def run_test(a: Assistant, text: str | None, wav: str | None, music_state: str |
             print("[stt] nothing clear was heard")
             return
     result = a.think(text, music_state)
-    print(f"[gemini] {result['ms']} ms {_tools(result)}\nfriday> {result['reply']}{_action(result)}")
+    print(f"[gemini] {result['ms']} ms {_tools(result)}\nfriday> {result['reply']}{_action(result)}{_cites(result)}")
     t0 = time.time()
     backend, first, rest, _ms = a.voice_start(result["reply"])
     audio = first + b"".join(rest)
@@ -575,6 +829,13 @@ def run_test(a: Assistant, text: str | None, wav: str | None, music_state: str |
     print(f"[tts] wrote {HERE / name}; play it to hear Friday")
     a.after_turn(text, result)
     a.background.idle(60)
+
+
+def _documents_health():
+    """For /health: "off", "connecting", "unreachable", or how many documents are ready (RAM only)."""
+    import cortex
+
+    return cortex.status()
 
 
 def main() -> None:
@@ -590,6 +851,9 @@ def main() -> None:
         print("Can't start:\n  " + "\n  ".join(bad) + "\nCopy .env.example to .env and fill it in.")
         sys.exit(1)
 
+    import cortex
+
+    cortex.start()                             # connects and warms up in the background: never delays start-up
     try:
         assistant = Assistant(with_stt=not args.test)
     except Exception as exc:
@@ -597,6 +861,7 @@ def main() -> None:
         sys.exit(1)
 
     if args.test or args.test_wav:
+        cortex.wait_ready(8)                   # a one-off question: give the list of documents a moment
         try:
             run_test(assistant, args.test, args.test_wav, args.music)
         except TurnError as exc:
@@ -604,6 +869,12 @@ def main() -> None:
         return
 
     Handler.assistant = assistant
+    import gemini
+
+    gemini.keepalive_start()
+    import weather
+
+    weather.start_prefetch(lambda: str(assistant.memory.profile().get("city") or ""))
     threading.Thread(target=discovery_loop, name="discovery", daemon=True).start()
     httpd = Server(("0.0.0.0", config.HTTP_PORT), Handler)
     print(f"\n[friday] listening on port {config.HTTP_PORT} (discovery on UDP {config.UDP_PORT})")

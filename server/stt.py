@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 import numpy as np
 
@@ -43,6 +44,24 @@ class STT:
             print(f"[stt] {device} failed ({exc}); using the CPU instead")
             self._model = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
         print("[stt] ready")
+
+    def warmup(self) -> None:
+        """Run a second of hiss through Whisper, with and without the voice-activity filter, so the first real
+        question isn't the one that pays for waking the model up (the first call after start-up is slower).
+        Whatever it "hears" is thrown away, and a failure here never stops the server starting."""
+        t0 = time.time()
+        hiss = (np.random.default_rng(0).standard_normal(config.SAMPLE_RATE) * 800).astype(np.int16)
+        try:
+            for vad in (False, True):
+                segments, _info = self._model.transcribe(pcm_to_float(hiss), language=config.WHISPER_LANGUAGE,
+                                                         beam_size=1, vad_filter=vad,
+                                                         condition_on_previous_text=False)
+                for _ in segments:                 # the segments are made lazily: this is what runs the model
+                    pass
+        except Exception as exc:
+            print(f"[stt] warm-up failed ({type(exc).__name__}: {exc}); the first question may be slower")
+            return
+        print(f"[stt] warmed up in {int((time.time() - t0) * 1000)} ms")
 
     def transcribe(self, pcm: np.ndarray) -> str:
         """pcm: int16 mono at config.SAMPLE_RATE. Returns the raw text it heard."""

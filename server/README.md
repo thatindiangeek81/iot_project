@@ -29,6 +29,7 @@ S3 --(Wi-Fi, HTTP)--> friday-local --> faster-whisper   (hearing, on the laptop)
 | "Pause" / "Resume" / "Next song" / "Go back" / "Stop" / "Louder" / "Volume 40" | `music_control` |
 | "Play Tum Hi Ho next" | Queues it after the current song |
 | "I added some songs" | Indexes new files in the music folder (`check_new_music`) |
+| "What do my biology notes say about mitochondria?" / "How do I reset the router, it's in the manual" | Answers from the documents you uploaded to Cortex and says which one, and which page, it came from |
 | Normal chat | She remembers the last 8 exchanges; after 10 minutes of silence a new conversation starts and the old one is summarised |
 
 She also **learns by herself**: after each reply, a background job asks Gemini whether you
@@ -181,6 +182,119 @@ the speaker receives it (`song.mp3`).
 Music needs the laptop: when the S3 falls back to the Cloudflare Worker, Friday says she
 can't play music right now.
 
+## Your documents (Cortex)
+
+Friday can answer from your own PDFs, Word and text files, and says where the answer came from
+("your biology notes, page three, say..."). The design and the numbers behind it are in
+[`docs/cortex.md`](../docs/cortex.md).
+
+```
+UPLOAD (any browser)                                    ASK (this laptop)
+Cortex upload page (Vercel) ── file ──▶ Supabase        question ─▶ friday-local
+   parse ▸ chunk ▸ Gemini embeddings ──▶ cortex.chunks       │  about your documents? (a local check, microseconds)
+                                          ▲                   ├─ yes: embed the question + cortex.search() ─▶ passages
+                                          └─ one SQL call ────┤       in the prompt ─▶ Gemini answers in ONE round
+                                                              └─ no: search in the background, offer search_documents
+```
+
+**Uploading** happens on the hosted Cortex page (password protected), not here. A document can be asked about
+once the page shows it as *ready*; Friday re-reads the list every `CORTEX_LIST_S` seconds (60).
+
+**Connecting Friday** (once): in Supabase open *Connect*, copy the **Session pooler** string (port 5432, not the
+transaction pooler on 6543), put the database password in it and set it in `.env`:
+
+```
+CORTEX_DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
+```
+
+TLS (`sslmode=require`) is added for you. At start-up friday-local connects in the background (it never delays
+start-up) and prints `[cortex] 3 document(s) ready` and `[cortex] ready in ... ms`. `/health` shows
+`"documents": 3`, or `"off"` / `"connecting"` / `"unreachable"`. Leave the setting empty and Cortex is off: no
+connection, no extra prompt text, Friday works exactly as before.
+
+**How Friday decides.** Each question first goes through a quick local check: phrases like *my notes*, *the
+manual*, *the pdf*, *according to my notes*, *what does the manual say*, or a distinctive word from one of your
+documents' names or subjects used as a reference ("the router", "in biology" for `Router_Manual.txt` and
+`biology-notes.pdf`). "How do routers work" or "what does the fox say" don't count: those go the tool way.
+
+- *Yes* (the **inject** path): the question is embedded and searched while her memory builds the prompt, and the
+  best passages go straight into Gemini's instructions, so she answers in one round. If nothing is similar enough,
+  Gemini is told so and she says she couldn't find it in your documents.
+- *No* (the **tool** path): she gets a `search_documents` tool and the list of your documents, and the same search
+  starts in the background as the question arrives (**prefetch**). If Gemini decides to look, the tool hands back
+  the prefetched passages at once instead of searching again, as long as she's looking for the same thing. A
+  follow-up ("tell me more about that one") or a named document is searched with her own wording.
+- If the database or Gemini's embedding fails, or takes longer than `CORTEX_TIMEOUT` (2.5 s), she answers without
+  the documents and says she couldn't reach them. A document problem never breaks a normal answer. A database call
+  that runs out of time is cancelled and its connection replaced, and if the database stops answering altogether
+  Cortex is marked unreachable within a few seconds, so later questions don't wait for it.
+
+**Citations.** Gemini marks each fact with the number of the passage it came from (`[1]`) and names the source once
+in words. The markers are never spoken (they're removed before the voice, also when a marker arrives split across
+pieces of a streamed reply). Which passages count as cited: the ones she marked; if she marked none, on the
+inject path none (she didn't use them: the question only looked like a document question), on the tool path all the
+passages the search returned. Where they show:
+
+- the console, under the reply (`[cortex] inject: [1] biology-notes.pdf p.3 (0.82)`);
+- `/chat` and `/ask?debug=1` JSON, as `citations`;
+- the `X-Citations` header of a `/say` or `/ask` reply that **isn't** streamed. A streamed reply (the default, what
+  the speaker gets) sends its headers before the answer exists, so it has no citations: for those, the console and
+  the upload page are the place to look, and she says the source out loud;
+- the upload page's *Recent answers*: each answer that cited something (and had no error) is saved to
+  `cortex.answers` by a small background worker of its own, with links to the cited pages. `X-No-Log: 1` skips it,
+  like the history.
+
+**Check it without the speaker:**
+
+```
+python cortex.py                                          what Cortex has
+python cortex.py "what is the function of mitochondria"   what a question finds, its similarities, and how long it took
+python server.py --test "what do my biology notes say about mitochondria"
+```
+
+| Setting | Default | Does |
+|---|---|---|
+| `CORTEX_DATABASE_URL` | empty | Supabase session pooler string. Empty = Cortex off |
+| `CORTEX_TOP_K` | `4` | Passages handed to Gemini per question |
+| `CORTEX_MIN_SIMILARITY` | `0.5` | Passages less similar than this (0 to 1) are left out. Lower it if she says she can't find things that are there; raise it if she quotes passages that don't fit. `python cortex.py "question"` lists every candidate's similarity, including those below the threshold |
+| `CORTEX_TIMEOUT` | `2.5` | Seconds a question waits for its passages at most |
+| `CORTEX_INJECT` | `1` | `0` = never put passages in the prompt up front; Gemini always decides with the tool (a second round) |
+| `CORTEX_PREFETCH` | `1` | `0` = search only when Gemini asks; questions then go to Google's embedding API only when they're about your documents |
+| `CORTEX_LIST_S` | `60` | How often the list of documents is re-read |
+| `CORTEX_MAX_CHARS` | `1200` | Characters per passage |
+| `CORTEX_LOG_ANSWERS` | `1` | Save document answers to `cortex.answers` |
+
+**Speed.** A question the check catches costs about 0.2-0.4 s more than an ordinary one (embedding the question at
+Google, then one database call to Mumbai, both on connections that are kept open), instead of a whole second Gemini
+round. An ordinary question costs nothing extra in time: the check takes microseconds and the prefetch runs in the
+background.
+
+**The prefetch and your embedding quota.** While you have documents, almost every question of three or more words
+("what's the weather like", "tell me a joke about cats") is sent once to Gemini's embedding API in the background, in
+case Gemini decides to search. That uses the same Gemini embedding quota as your uploads (the free tier has a daily
+limit). `CORTEX_PREFETCH=0` turns it off: then a question goes to the embedding API only when it is about your
+documents (the check said so, or Gemini called the tool), and a tool search costs about 0.3 s more.
+The `[latency]` line and `latency.log` say how long each question waited for the documents (`rag_mode`, `rag_ms`,
+`embed_ms`, `search_ms`).
+
+**Privacy.** Your documents live in your Supabase project (Mumbai), not on this laptop. Friday reads them with the
+database password in `.env`; the browser never sees a Supabase key. The few passages that match a question go to
+Gemini with that question, like your memories do. With `CORTEX_PREFETCH=1` (the default) and documents uploaded,
+almost every question of three or more words also goes to Gemini's embedding API; with `CORTEX_PREFETCH=0` only
+questions about your documents do. Text inside a document is treated as reference, never as instructions, and it
+can't break out of the passage markers it is given to Gemini in.
+
+**If it doesn't work:**
+
+| Problem | Fix |
+|---|---|
+| `[cortex] can't reach postgresql://...` at start-up | Wrong password, or the transaction pooler (6543) instead of the session pooler (5432), or the Supabase project is paused (free projects pause after a week unused: open the dashboard to wake it). Friday keeps trying every 10 s |
+| `"documents": 0` | Nothing is *ready* yet: check the upload page; documents still processing aren't searched |
+| She says she can't find something that's there | Lower `CORTEX_MIN_SIMILARITY` (try 0.4), or ask with "my notes" / the document's name so the check catches it |
+| `[cortex] no passages within 2.5 s` | The network to Google or Mumbai is slow; raise `CORTEX_TIMEOUT` a little |
+| `[cortex] search-3 didn't answer in time: cancelled, closed and replaced` | A database call hung (a network that drops traffic). Friday has already replaced the connection; if it keeps happening, `/health` will show `"unreachable"` until the line recovers |
+| `[cortex] embedding failed: gemini rate limit hit` | Too many questions for the free embedding quota: set `CORTEX_PREFETCH=0` so only document questions are embedded |
+
 ## Speed
 
 Every question prints where its time went, and the same numbers go into `latency.log`
@@ -204,11 +318,78 @@ The S3's `[time]` line adds the upload and the speaker's buffer on top.
 The database isn't a bottleneck: all of its queries together take about 10–20 ms per question,
 and memories and the music library are kept in RAM.
 
+## Making replies faster
+
+Friday no longer waits for Gemini to finish the whole reply before she starts talking. The answer is
+cut into sentences as it arrives, the first one is spoken while the rest is still being written, and the
+voice makes the next ones in the background so there's no gap. This works for spoken questions (`/ask`)
+and typed ones (`/say`). [`docs/latency.md`](../docs/latency.md) has the measurements behind it and the
+ideas that were left out on purpose.
+
+| Setting | Default | Does |
+|---|---|---|
+| `STREAM_REPLIES` | `1` | Start speaking while Gemini is still writing. `0` = the old way, the whole reply first |
+| `STREAM_HOLD_MS` | `1500` | A reply is started when Gemini has finished the round that writes it, or this many ms after the first sentence of that round, whichever comes first. Once it has started, a music command can't be added to it |
+| `TOOL_FILLER` | `1` | Says "One sec, boss." while a slow tool (web search, a weather lookup that isn't cached) runs |
+| `TTS_PARALLEL` | `3` | How many sentences of one reply the Edge voice makes at the same time. `1` = one after another |
+| `STREAM_MAX_FAILS` | `3` | After this many turns in a row where streaming broke before sending anything, it switches itself off until the server restarts. Those turns were answered the old way |
+| `GEMINI_HEDGE_S` | `3` | No first word from Gemini after this many seconds: ask again on a fresh connection and use whichever answers first. `0` = never |
+| `GEMINI_KEEPALIVE_S` | `40` | A tiny request to Google when the line has been quiet this long, so its connection doesn't go stale. `0` = off |
+| `WEATHER_CACHE_S`, `WEATHER_PREFETCH`, `WEATHER_TIMEOUT` | `600`, `1`, `4` | A weather lookup is reused for 10 minutes, your profile's city is refreshed in the background, and Open-Meteo gets 4 s before Friday gives up on it |
+| `STT_WARMUP` | `1` | Runs Whisper once on a second of noise when the server starts, so the first question isn't the slow one |
+
+`STREAM_REPLIES=0` brings back the old behaviour exactly. The server also falls back to it by itself for a
+question where streaming fails before it has sent anything (the console says
+`[stream] broke before sending anything (...)`, with the reason). `python server.py --test` always uses the old way.
+
+### Measuring
+
+With the server running, in another terminal on the same laptop:
+
+```
+python tools/bench_latency.py                    8 questions x 3 rounds, each asked with streaming off and on, in turns
+python tools/bench_latency.py --runs 5 --gap 60  steadier, with a minute between questions so the connections go cold
+python tools/bench_latency.py --tools            also questions that need the weather or a web search
+python tools/bench_latency.py --wav q.wav        also a recording (that includes Whisper); --csv times.csv keeps every timing
+python tools/diag_network.py                     what a new connection to Google, Open-Meteo and the Edge voice costs
+python tools/diag_network.py --idle              and how long an idle connection to Google survives (about 8 minutes)
+```
+
+The benchmark prints the time to the first sound and to the end of each reply as median, slowest 10 % and
+worst. Look at the slowest 10 %: that's what you notice. `diag_network.py` says in words what its numbers
+mean, and suggests a `GEMINI_KEEPALIVE_S` if idle connections die on your network. Neither changes any setting.
+
+Two request headers help when testing by hand (the speaker never sends them). `X-Stream: 0` or `1` decides
+streaming for that one request, even after the automatic switch-off. `X-No-Log: 1` answers normally but keeps
+the exchange out of the history and out of what she learns, which is how the benchmark avoids filling her
+memory with its questions.
+
+### Reading `latency.log`
+
+One line per question, tab-separated, with a header row. (A log from an older version, with other columns,
+is renamed to `latency.<date>.log` and a new one is started.)
+
+| Column | Meaning |
+|---|---|
+| `first_audio_ms` | From the question reaching the laptop to the first sound leaving it. If she said "One sec, boss." first, that is the filler: `answer_ms` is when the answer began |
+| `stt_ms`, `prompt_ms`, `gemini_ms`, `tool_ms`, `tts_ms` | Hearing, building the prompt, Gemini (`a+b` = several rounds), tools, and the voice (for a streamed reply: how long the first sentence took to become audio) |
+| `quick` | 1 = a music command answered by the laptop without a second Gemini call |
+| `stream` | 1 = the reply was streamed. Then, for a plain reply (no filler, no tool call), `first_audio_ms` is about `stt_ms` + `first_sentence_ms` + `tts_ms`; the console line shows any wait for the hold as "held back". `gemini_ms` is all of Gemini's writing, which carries on after that |
+| `first_sentence_ms`, `ttft_ms` | Streamed only: Gemini's time to the first full sentence, and to its first word |
+| `hedged` | Streamed only: 1 = the first word took so long that Friday asked again |
+| `filler` | Streamed only: 1 = a filler line was spoken while a tool ran |
+| `answer_ms` | Streamed only: when the answer itself started to sound: the first audio of the last round that was heard, so not the filler and not something said before a tool call |
+| `rag_mode` | How the documents were used: `inject` (passages in the prompt, waited for before Gemini), `prefetch` (the tool answered from the background search), `tool` (the tool searched when asked); empty = not used |
+| `rag_ms`, `embed_ms`, `search_ms` | How long the question waited for the documents (for `inject` before Gemini, otherwise inside `tool_ms`), and of that search, the question's embedding (`0` = cached) and the database call |
+
 ## Privacy
 
-Recordings, transcripts and memories stay on this laptop. What leaves it: the text of
-each question (plus the profile and relevant memories) goes to Gemini, and each memory is
-sent once to Gemini's embedding API to index it. Passwords, PINs and card numbers are refused.
+Recordings, transcripts and memories stay on this laptop; your uploaded documents live in your own Supabase
+project (see [Your documents](#your-documents-cortex)). What leaves the laptop: the text of each question (plus the
+profile, relevant memories and any matching document passages) goes to Gemini, each memory is sent once to Gemini's
+embedding API to index it, and while you have documents uploaded almost every question of three or more words is
+sent once to the embedding API too (the Cortex prefetch; with `CORTEX_PREFETCH=0` only questions about your
+documents). Passwords, PINs and card numbers are refused.
 
 ## If something fails
 
@@ -222,7 +403,10 @@ sent once to Gemini's embedding API to index it. Passwords, PINs and card number
 | `[tool] web_search(...) -> {"error": ...duckduckgo...}` | `pip install ddgs`, or DuckDuckGo is rate-limiting you: wait a minute |
 | `time zone Asia/Kolkata not found` | `pip install tzdata` |
 | The S3 never finds the laptop | Firewall rules above, network set to Private, same Wi-Fi. Check with `python client.py --find` from another PC |
-| First answer slow | Whisper loads on start; the first Gemini call also opens its connection |
+| First answer slow | Whisper loads and warms up on start (`STT_WARMUP`), and the first Gemini call opens its connection: wait for `[stt] warmed up` and `[gemini] connection ready` |
+| `[stream] broke before sending anything (...)` | Streaming failed before any sound went out, so that question was answered the old way. The text in brackets is the reason. After `STREAM_MAX_FAILS` in a row it stays off until the restart; `STREAM_REPLIES=0` turns it off for good |
+| `[gemini] nothing after 3 s; asking again on a fresh connection` | Normal now and then: Gemini was slow to start, so Friday asked a second time and used whichever answered first. If it's every question, run `python tools/diag_network.py` |
+| `[tts] stopped mid-reply: ...` | The voice failed after she had started speaking, so the reply ends where it stopped. The reason follows the colon (usually the internet) |
 | `[music] 0 songs in the library` | Run `python music.py scan` |
 | `ffmpeg not found` at start-up | `winget install Gyan.FFmpeg`, open a new terminal; or set `FFMPEG=C:\path\to\ffmpeg.exe` in `.env`. Without it MP3s still play, M4As don't |
 | She plays the wrong song | Check the match with `python music.py list`; fix `title` / `artist` in Adminer |

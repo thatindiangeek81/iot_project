@@ -84,6 +84,20 @@ HISTORY_TURNS = _get_int("HISTORY_TURNS", 8)          # recent exchanges kept wo
 SESSION_GAP_MIN = _get_int("SESSION_GAP_MIN", 10)     # silence that starts a new conversation
 TIMEZONE = _get("TIMEZONE", "Asia/Kolkata")
 
+# --- Your documents (Cortex) ---------------------------------------
+# Documents are uploaded on the hosted Cortex page and stored in Supabase; Friday reads them
+# straight from the database. Empty = Cortex is off and Friday works exactly as before.
+# Use the SESSION pooler string (Supabase > Connect > Session pooler, port 5432).
+CORTEX_DATABASE_URL = _get("CORTEX_DATABASE_URL", "")
+CORTEX_TOP_K = _get_int("CORTEX_TOP_K", 4)                       # passages handed to Gemini per question
+CORTEX_MIN_SIMILARITY = _get_float("CORTEX_MIN_SIMILARITY", 0.5) # passages less similar than this are dropped
+CORTEX_TIMEOUT = _get_float("CORTEX_TIMEOUT", 2.5)               # seconds a turn waits for passages, at most
+CORTEX_INJECT = _get_bool("CORTEX_INJECT", True)     # obvious document questions: passages in the prompt, one round
+CORTEX_PREFETCH = _get_bool("CORTEX_PREFETCH", True) # other questions: search in the background in case Gemini asks
+CORTEX_LIST_S = _get_int("CORTEX_LIST_S", 60)                    # re-read the list of documents this often
+CORTEX_MAX_CHARS = _get_int("CORTEX_MAX_CHARS", 1200)            # per passage
+CORTEX_LOG_ANSWERS = _get_bool("CORTEX_LOG_ANSWERS", True)       # keep document answers in cortex.answers
+
 # --- Speech recognition (faster-whisper) ------------------------------
 WHISPER_MODEL = _get("WHISPER_MODEL", "base")
 WHISPER_LANGUAGE = _get("WHISPER_LANGUAGE", "en") or None
@@ -102,6 +116,7 @@ EDGE_TIMEOUT = _get_float("EDGE_TIMEOUT", 15.0)
 EDGE_NO_BOSS_COMMA = _get_bool("EDGE_NO_BOSS_COMMA", True)   # "Got it, boss." is read as "Got it boss."
 TTS_CACHE_MAX = _get_int("TTS_CACHE_MAX", 500)        # short replies kept as audio files (0 = off)
 TTS_CACHE_DIR = _get("TTS_CACHE_DIR", str(HERE / "voice_cache"))
+TTS_PARALLEL = _get_int("TTS_PARALLEL", 3)           # sentences of one reply the Edge voice makes at the same time
 # Local voice: leave both blank to use the Windows voice. Set both to use Piper.
 PIPER_EXE = _get("PIPER_EXE")
 PIPER_MODEL = _get("PIPER_MODEL")
@@ -138,6 +153,32 @@ SAMPLE_RATE = 16000
 MIN_AUDIO_SECONDS = 0.3
 MAX_AUDIO_SECONDS = 30
 MAX_INPUT_CHARS = 500
+
+# --- Speed ------------------------------------------------------------
+# What each one does is explained under "Making replies faster" in the README.
+# No first word from Gemini after this many seconds: ask again on a fresh connection and use
+# whichever answers first (0 = never). This is what turns a 15 s stall into a 4 s one.
+GEMINI_HEDGE_S = _get_float("GEMINI_HEDGE_S", 3.0)
+# Reuse a weather lookup for this many seconds (0 = always ask), and keep your home city's
+# weather fresh in the background so "what's the weather" is instant
+WEATHER_CACHE_S = _get_int("WEATHER_CACHE_S", 600)
+WEATHER_PREFETCH = _get_bool("WEATHER_PREFETCH", True)
+WEATHER_TIMEOUT = _get_float("WEATHER_TIMEOUT", 4.0)        # seconds to wait for Open-Meteo
+# Ping Google when the line has been quiet this long, so the connection never goes stale (0 = off)
+GEMINI_KEEPALIVE_S = _get_int("GEMINI_KEEPALIVE_S", 40)
+# Run Whisper once at start-up so the first question isn't the slow one
+STT_WARMUP = _get_bool("STT_WARMUP", True)
+# Start speaking while Gemini is still writing (0 = write the whole reply first, as before). A request
+# can override this with an X-Stream: 0 or 1 header, which is how the benchmark compares the two.
+STREAM_REPLIES = _get_bool("STREAM_REPLIES", True)
+# A reply isn't started until Gemini has finished the round that writes it (so a music command can't
+# arrive too late for it), unless this many milliseconds have passed since the first sentence of that round
+STREAM_HOLD_MS = _get_int("STREAM_HOLD_MS", 1500)
+# Say "One sec, boss." while a slow tool (web search, weather that isn't cached) runs
+TOOL_FILLER = _get_bool("TOOL_FILLER", True)
+# Streaming switches itself off (until the server is restarted) after this many turns in a row where
+# it broke before sending anything; those turns were answered the normal way
+STREAM_MAX_FAILS = _get_int("STREAM_MAX_FAILS", 3)
 
 # --- Debug ------------------------------------------------------------
 SAVE_AUDIO = _get_bool("SAVE_AUDIO", True)
