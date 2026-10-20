@@ -756,8 +756,21 @@ def _save(name: str, pcm: np.ndarray) -> None:
             pass
 
 
+def _exclusive(sock: socket.socket) -> None:
+    """On Windows, SO_REUSEADDR lets a second program bind a port that is already in use, silently,
+    and the speaker then talks to whichever copy of Friday Windows picks (usually the old one).
+    SO_EXCLUSIVEADDRUSE makes the second bind fail instead."""
+    if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    allow_reuse_address = sys.platform != "win32"   # see _exclusive(): on Windows reuse means port sharing
+
+    def server_bind(self) -> None:
+        _exclusive(self.socket)
+        super().server_bind()
 
     def handle_error(self, request, client_address) -> None:
         # The speaker hangs up whenever a song is skipped or paused: not worth a traceback.
@@ -772,8 +785,16 @@ class Server(ThreadingHTTPServer):
 
 def discovery_loop() -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", config.UDP_PORT))
+    if sys.platform == "win32":
+        _exclusive(sock)                       # a second Friday must not answer the speaker too
+    else:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("0.0.0.0", config.UDP_PORT))
+    except OSError as exc:
+        print(f"[discovery] UDP port {config.UDP_PORT} is taken ({exc}): is another Friday server running? "
+              f"The speaker won't find this one.")
+        return
     reply = f"I2SONIC!{config.HTTP_PORT}".encode()
     while True:
         try:
@@ -876,7 +897,14 @@ def main() -> None:
 
     weather.start_prefetch(lambda: str(assistant.memory.profile().get("city") or ""))
     threading.Thread(target=discovery_loop, name="discovery", daemon=True).start()
-    httpd = Server(("0.0.0.0", config.HTTP_PORT), Handler)
+    try:
+        httpd = Server(("0.0.0.0", config.HTTP_PORT), Handler)
+    except OSError as exc:
+        print(f"Can't start: port {config.HTTP_PORT} is already in use ({exc}).\n"
+              f"Another Friday server is probably still running (an old terminal window). Close it, or find it with\n"
+              f"  netstat -ano | findstr :{config.HTTP_PORT}\n"
+              f"and stop that process:  taskkill /PID <number> /F")
+        sys.exit(1)
     print(f"\n[friday] listening on port {config.HTTP_PORT} (discovery on UDP {config.UDP_PORT})")
     for ip in lan_ips():
         print(f"         http://{ip}:{config.HTTP_PORT}/health")
