@@ -14,6 +14,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import config
+import cortex
 import gemini
 from memory import Memory
 
@@ -124,13 +125,24 @@ MUSIC_RULES = (
 )
 NO_MUSIC = "You can't play music on this speaker right now (the laptop's music library isn't connected); say so briefly if asked."
 
+DOCS_TOOL = _tool(
+    "search_documents", "Find the answer in the user's own uploaded documents (notes, PDFs, manuals, Word files). "
+    "Use it whenever the user asks about their documents, notes or files, or about a topic one of them covers.",
+    {"query": {"type": "string", "description": "The question as a clear, standalone search, with obvious mishearings "
+               "fixed, e.g. 'what is the function of mitochondria'"},
+     "document": {"type": "string", "description": "Optional: only search this document. A filename, or part of one, "
+                  "from the list of the user's documents. Leave it out unless the user named a document"}},
+    ["query"])
+# The prompt text about documents lives in cortex.py, next to the code that decides which of it to use.
+
 
 def clean_for_speech(text: str) -> str:
     """Strip anything that sounds wrong when spoken."""
     out = re.sub(r"```[\s\S]*?```", " ", text or "")
+    out = re.sub(r"\s*\[\d{1,2}\]\([^)]*\)", "", out)          # [1](url): a citation as a link, dropped whole
     out = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", out)      # [text](url) -> text
     out = re.sub(r"https?://\S+", " ", out)
-    out = re.sub(r"\s*\[\d+(?:,\s*\d+)*\]", "", out)        # citation markers [1], [2, 3]
+    out = re.sub(r"\s*\[\s*\d{1,2}(?:\s*[-\u2013,]\s*\d{1,2})*\s*\]", "", out)   # citation markers [1], [2, 3], [1-3]; not [2019]
     out = re.sub(r"[*_#`>|~]", "", out)
     out = re.sub(r"^\s*[-•]\s+", "", out, flags=re.M)
     out = re.sub(r"\s+", " ", out).strip()
@@ -218,6 +230,39 @@ class SentenceChunker:
         return None
 
 
+_MARK_INNER = r"\d{1,2}(?:\s*[,\u2013-]\s*\d{1,2})*"
+_MARK_ANY = re.compile(r"\[\s*(" + _MARK_INNER + r")\s*\]")
+_MARK_AFTER_STOP = re.compile(r"([.!?]+)((?:\[\d{1,2}(?:[,\u2013-]\d{1,2})*\])+)")
+_MARK_HOLD = re.compile(r"(?:[.!?]+[\"')]*)?\s*\[[\d,\s\u2013-]{0,12}$|[.!?]+[\"')]*$")
+
+
+class MarkerFilter:
+    """Sits between Gemini's stream and the SentenceChunker when documents are in play, so a citation
+    marker can never be spoken, however the stream cuts it up:
+      - "[1" at the end of a piece is held back until the "]" comes ("[" + "1]" is still one marker);
+      - "[1, 2]" becomes "[1,2]", which the chunker can't cut in two at its comma or space;
+      - "fact.[1] Next" becomes "fact[1]. Next", so the sentence still ends where it should.
+    clean_for_speech() then removes the whole marker from the sentence it is in. Holding back a full stop
+    at the very end of a piece costs nothing: the chunker can't end a sentence before the space after it."""
+
+    def __init__(self) -> None:
+        self.held = ""
+
+    def feed(self, text: str) -> str:
+        buf = _MARK_ANY.sub(lambda m: "[" + re.sub(r"\s+", "", m.group(1)) + "]", self.held + text)
+        buf = _MARK_AFTER_STOP.sub(r"\2\1", buf)
+        m = _MARK_HOLD.search(buf)
+        if m:
+            self.held, buf = buf[m.start():], buf[:m.start()]
+        else:
+            self.held = ""
+        return buf
+
+    def flush(self) -> str:
+        rest, self.held = self.held, ""
+        return _MARK_AFTER_STOP.sub(r"\2\1", _MARK_ANY.sub(lambda m: "[" + re.sub(r"\s+", "", m.group(1)) + "]", rest))
+
+
 class SpeechBudget:
     """Cleans each streamed sentence for the ear and enforces MAX_REPLY_CHARS the way for_speech()
     does for a whole reply: past the limit the reply ends on the last full sentence, or, if less than
@@ -284,6 +329,7 @@ class Brain:
         self._actions: dict = {}     # what this turn asks the speaker to do (play, pause, volume)
         self._music_results: list = []   # this round's music tool results, for quick replies
         self._music_ok = lambda: True    # False once a streamed reply has started: music can't change any more
+        self._cortex = None              # this turn's use of the user's documents (None = Cortex is off)
         try:
             self.tz = ZoneInfo(config.TIMEZONE)   # on Windows this needs the tzdata package
         except Exception:
@@ -312,6 +358,8 @@ class Brain:
             parts.append("\n" + MUSIC_RULES + "\n" + self.jukebox.describe())
         else:
             parts.append("\n" + NO_MUSIC)
+        if self._cortex is not None:
+            parts.append("\n" + self._cortex.prompt_block())
         parts.append(STYLE_EXAMPLES)
         return "\n".join(parts)
 
@@ -339,6 +387,8 @@ class Brain:
                 import search
 
                 result = search.web_search(str(args.get("query", "")))
+            elif name == "search_documents" and self._cortex is not None and self._cortex.offers_tool():
+                result = self._cortex.tool(str(args.get("query", "")), str(args.get("document") or ""))
             else:
                 result = {"error": f"unknown tool {name}"}
         except gemini.GeminiError as exc:
@@ -383,12 +433,20 @@ class Brain:
         self._actions = {}
         self._music_results = []
         self._music_ok = lambda: True
+        # Cortex first: an obvious document question starts its retrieval now and runs while memory builds the
+        # prompt; the prompt waits for the passages only at the very end (bounded by CORTEX_TIMEOUT). Choosing the
+        # path is RAM only: nothing here waits on the network for an ordinary question.
+        self._cortex = cortex.Turn(heard) if cortex.enabled() else None
         ctx = self.memory.begin_turn()
         messages = [{"role": "system", "content": self._system(heard, ctx)}]
         messages += ctx["history"]
         messages.append({"role": "user", "content": heard})
         tools = TOOLS + [WEATHER_TOOL] + ([SEARCH_TOOL] if config.WEB_SEARCH else []) + (MUSIC_TOOLS if jukebox else [])
+        if self._cortex is not None and self._cortex.offers_tool():
+            tools = tools + [DOCS_TOOL]
         timing = {"prompt_ms": int((time.time() - started) * 1000), "gemini_ms": [], "tool_ms": 0, "fast": False}
+        if self._cortex is not None:
+            timing["prompt_ms"] = max(0, timing["prompt_ms"] - self._cortex.timing["rag_ms"])
         return started, ctx, messages, tools, timing
 
     @staticmethod
@@ -421,11 +479,19 @@ class Brain:
         """What this turn has asked the speaker to do so far (play, pause, volume)."""
         return dict(self._actions)
 
-    def _result(self, reply: str, used: list, timing: dict, started: float, ctx: dict) -> dict:
-        return {"reply": reply, "tools": used, "actions": dict(self._actions), "timing": timing,
-                "ms": int((time.time() - started) * 1000),
-                "episode_id": ctx["episode_id"], "new_session": ctx["new_session"],
-                "previous_id": ctx["previous_id"]}
+    def _result(self, reply: str, used: list, timing: dict, started: float, ctx: dict, raw: str = "") -> dict:
+        out = {"reply": reply, "tools": used, "actions": dict(self._actions), "timing": timing,
+               "ms": int((time.time() - started) * 1000),
+               "episode_id": ctx["episode_id"], "new_session": ctx["new_session"],
+               "previous_id": ctx["previous_id"], "citations": []}
+        cx = self._cortex
+        if cx is not None:
+            timing.update(cx.timing)
+            summary = cx.summary()
+            if summary is not None:                # the documents were used for this answer
+                out["citations"] = cx.citations(raw)
+                out["cortex"] = summary
+        return out
 
     def answer(self, heard: str, jukebox=None) -> dict:
         """Returns {reply, tools, actions, ms, timing, episode_id, ...}. Raises GeminiError if Gemini fails.
@@ -433,7 +499,7 @@ class Brain:
         started, ctx, messages, tools, timing = self._begin(heard, jukebox)
 
         used: list[dict] = []
-        reply = ""
+        reply = raw = ""
         for round_no in range(config.MAX_TOOL_ROUNDS + 1):
             last_round = round_no == config.MAX_TOOL_ROUNDS
             t0 = time.time()
@@ -442,7 +508,7 @@ class Brain:
             timing["gemini_ms"].append(int((time.time() - t0) * 1000))
             calls = msg.get("tool_calls") or []
             if not calls:
-                reply = msg.get("content") or ""
+                reply = raw = msg.get("content") or ""
                 break
             messages.append(self._assistant_message(msg))
             self._run_calls(calls, messages, used, timing)
@@ -455,7 +521,7 @@ class Brain:
         reply = for_speech(reply)
         if not reply:
             raise gemini.GeminiError("gemini returned an empty answer", 502)
-        return self._result(reply, used, timing, started, ctx)
+        return self._result(reply, used, timing, started, ctx, raw)
 
     def answer_stream(self, heard: str, jukebox=None, sink=None) -> dict:
         """answer(), but streamed: Gemini's reply is cut into sentences while it is being written and
@@ -470,10 +536,12 @@ class Brain:
         timing.update({"stream": True, "first_sentence_ms": None, "ttft_ms": None, "hedged": False})
 
         used: list[dict] = []
-        reply = ""
+        reply = raw = ""
         for round_no in range(config.MAX_TOOL_ROUNDS + 1):
             last_round = round_no == config.MAX_TOOL_ROUNDS
             chunker, budget = SentenceChunker(), SpeechBudget(config.MAX_REPLY_CHARS)
+            marks = MarkerFilter() if self._cortex is not None else None     # [n] can't be spoken, however it's cut
+            written: list[str] = []
             info: dict = {}
             first_ms = None
             msg = None
@@ -487,7 +555,8 @@ class Brain:
                     if kind == "end":
                         msg = value
                         continue
-                    for sentence in chunker.feed(value):
+                    written.append(value)
+                    for sentence in chunker.feed(marks.feed(value) if marks else value):
                         if self._emit(sentence, budget, sink) and first_ms is None:
                             first_ms = int((time.time() - started) * 1000)
                     if budget.full:
@@ -502,10 +571,14 @@ class Brain:
             calls = (msg or {}).get("tool_calls") or []
             if not calls:
                 if not budget.full:
+                    for sentence in (chunker.feed(marks.flush()) if marks else []):
+                        if self._emit(sentence, budget, sink) and first_ms is None:
+                            first_ms = int((time.time() - started) * 1000)
                     tail = chunker.flush()
                     if tail and self._emit(tail, budget, sink) and first_ms is None:
                         first_ms = int((time.time() - started) * 1000)
                 reply = " ".join(budget.parts)
+                raw = "".join(written)
                 if not reply:
                     raise gemini.GeminiError("gemini returned an empty answer", 502)
                 timing["first_sentence_ms"] = first_ms
@@ -528,7 +601,7 @@ class Brain:
 
         if not reply:
             raise gemini.GeminiError("gemini returned an empty answer", 502)
-        return self._result(reply, used, timing, started, ctx)
+        return self._result(reply, used, timing, started, ctx, raw)
 
     @staticmethod
     def _emit(sentence: str, budget: SpeechBudget, sink) -> bool:
@@ -543,6 +616,8 @@ class Brain:
         name = fn.get("name", "")
         if name == "web_search":
             return bool(config.WEB_SEARCH)
+        if name == "search_documents":
+            return self._cortex is not None and self._cortex.tool_is_slow()
         if name == "get_weather":
             try:
                 args = json.loads(fn.get("arguments") or "{}")

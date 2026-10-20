@@ -35,3 +35,6 @@ worker/.wrangler/
 .idea/
 .DS_Store
 Thumbs.db
+
+# --- the original Cortex project: its own git repo (and its backend/.env.bak holds a real password) ---
+Cortex/

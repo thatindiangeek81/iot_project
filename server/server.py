@@ -126,6 +126,14 @@ class Assistant:
 
     def after_turn(self, heard: str, result: dict) -> None:
         """Log the exchange now (fast), learn from it later (slow, background)."""
+        cx = result.get("cortex")
+        if heard and cx:                                        # a document answer: for "Recent answers"
+            import cortex
+
+            if cortex.should_log(result):                       # cited something, nothing failed
+                latency = dict(cx.get("latency") or {})
+                latency["first_audio_ms"] = (result.get("timing") or {}).get("first_audio_ms")
+                cortex.queue_answer(heard, result["reply"], result.get("citations") or [], cx.get("mode"), latency)
         if not heard or not result.get("episode_id"):
             return
         try:
@@ -216,12 +224,14 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"{len(part):X}\r\n".encode() + part + b"\r\n")
         self.wfile.flush()
 
-    def _stream(self, header: bytes, first: bytes, rest, backend) -> bytes:
+    def _stream(self, header: bytes, first: bytes, rest, backend, citations=None) -> bytes:
         """Send the frame header with the first audio straight away, then the
         rest of the reply (same voice) as soon as each piece is ready."""
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Transfer-Encoding", "chunked")
+        if citations:
+            self.send_header("X-Citations", _citations_header(citations))
         self.end_headers()
         sent = [first]
         self._chunk(header + first)
@@ -256,6 +266,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, "server": "friday-local", "model": config.GEMINI_MODEL,
                     "voice": a.tts.name, "stt": config.WHISPER_MODEL if a.stt else None,
                     "facts": a.memory.count_facts(), "web_search": config.WEB_SEARCH, "stream": a.stream_enabled(),
+                    "documents": _documents_health(),
                     "music": {"songs": jb.count(), "ffmpeg": bool(jb.ffmpeg)} if jb else None})
 
     # ------------------------------------------------------------ music
@@ -511,13 +522,15 @@ class Handler(BaseHTTPRequestHandler):
             print("[turn] the speaker hung up mid-reply")
         else:
             timing = result.get("timing") or {}
+            timing["first_audio_ms"] = reply.first_audio_ms
             _latency("typed" if typed else "spoken", heard, stt_ms, result, reply.tts_ms or 0,
                      reply.first_audio_ms or 0,
                      {"first_sentence_ms": timing.get("first_sentence_ms"), "ttft_ms": timing.get("ttft_ms"),
                       "hedged": timing.get("hedged"), "filler": reply.filler, "answer_ms": reply.answer_ms})
             print(f"[turn] {'typed' if typed else 'heard'} \"{heard}\" | "
                   f"{'' if typed else f'Whisper {stt_ms} ms | '}Gemini {result['ms']} ms {_tools(result)}| "
-                  f"{reply.voice.name} {reply.tts_ms} ms (streamed)\nfriday> {result['reply']}{_action(result)}")
+                  f"{reply.voice.name} {reply.tts_ms} ms (streamed)\nfriday> {result['reply']}{_action(result)}"
+                  f"{_cites(result)}")
             _save_reply(bytes(reply.audio), reply.voice.fmt)
         self._after(heard, result)
         return True
@@ -540,8 +553,8 @@ class Handler(BaseHTTPRequestHandler):
     def _chat(self, text: str) -> None:
         result = self.assistant.think(text, self.music_state)
         self._json({"reply": result["reply"], "ms": result["ms"], "tools": [t["tool"] for t in result["tools"]],
-                    "action": result.get("actions") or {}})
-        print(f"[turn] typed \"{text}\" -> {result['reply']}")
+                    "action": result.get("actions") or {}, "citations": result.get("citations") or []})
+        print(f"[turn] typed \"{text}\" -> {result['reply']}{_cites(result)}")
         self._after(text, result)
 
     def _say(self, text: str) -> None:
@@ -555,10 +568,11 @@ class Handler(BaseHTTPRequestHandler):
             self._stream_failed()
         backend, first, rest, tts_ms = self._first_voice(result["reply"], action=result.get("actions") or {})
         header = self._header(None, result, backend, tts_ms, 0)
-        audio = self._stream(header, first, rest, backend)
+        audio = self._stream(header, first, rest, backend, result.get("citations"))
+        (result.get("timing") or {})["first_audio_ms"] = self.first_audio_ms
         _latency("typed", text, 0, result, tts_ms, self.first_audio_ms)
         print(f"[turn] typed \"{text}\" | Gemini {result['ms']} ms {_tools(result)}| {backend.name} {tts_ms} ms\n"
-              f"friday> {result['reply']}{_action(result)}")
+              f"friday> {result['reply']}{_action(result)}{_cites(result)}")
         _save_reply(audio, backend.fmt)
         self._after(text, result)
 
@@ -582,22 +596,26 @@ class Handler(BaseHTTPRequestHandler):
 
         if debug:
             self._json({"heard": heard, "raw_transcript": raw, "reply": result["reply"], "stt_ms": stt_ms,
-                        "chat_ms": result["ms"], "tools": result["tools"],
+                        "chat_ms": result["ms"], "tools": result["tools"], "citations": result.get("citations") or [],
                         "seconds": round(pcm.size / config.SAMPLE_RATE, 2)})
         else:
             backend, first, rest, tts_ms = self._first_voice(result["reply"], heard=heard,
                                                              action=result.get("actions") or {})
             header = self._header(heard, result, backend, tts_ms, stt_ms)
-            audio = self._stream(header, first, rest, backend)
+            audio = self._stream(header, first, rest, backend, result.get("citations"))
+            if result.get("timing") is not None:
+                result["timing"]["first_audio_ms"] = self.first_audio_ms
             _latency("spoken", heard, stt_ms, result, tts_ms, self.first_audio_ms)
             _save_reply(audio, backend.fmt)
             print(f"[turn] heard \"{heard or '(nothing clear)'}\" | Whisper {stt_ms} ms | Gemini {result['ms']} ms "
-                  f"{_tools(result)}| {backend.name} {tts_ms} ms\nfriday> {result['reply']}{_action(result)}")
+                  f"{_tools(result)}| {backend.name} {tts_ms} ms\nfriday> {result['reply']}{_action(result)}"
+                  f"{_cites(result)}")
         self._after(heard, result)
 
 
 LATENCY_COLUMNS = ("time", "kind", "first_audio_ms", "stt_ms", "prompt_ms", "gemini_ms", "tool_ms", "tts_ms", "quick",
-                   "stream", "first_sentence_ms", "ttft_ms", "hedged", "filler", "answer_ms", "said")
+                   "stream", "first_sentence_ms", "ttft_ms", "hedged", "filler", "answer_ms",
+                   "rag_mode", "rag_ms", "embed_ms", "search_ms", "said")
 
 
 def _latency(kind: str, said: str, stt_ms: int, result: dict, tts_ms: int, first_audio_ms: int,
@@ -629,6 +647,10 @@ def _latency(kind: str, said: str, stt_ms: int, result: dict, tts_ms: int, first
             line += f" + held back {held}"
         line += (f"; the answer itself from {s.get('answer_ms')} ms; "
                  f"Gemini {gemini} and tools {t.get('tool_ms', 0)} in all")
+    if t.get("rag_mode"):
+        where = "before Gemini, not in memory/prompt" if t["rag_mode"] == "inject" else "inside tools"
+        line += (f"; documents ({t['rag_mode']}) waited {t.get('rag_ms', 0)} ms {where} "
+                 f"[embed {_ms(t.get('embed_ms'))}, search {'-' if t.get('search_ms') is None else t['search_ms']} ms]")
     print(line)
     if not config.LATENCY_LOG:
         return
@@ -638,6 +660,8 @@ def _latency(kind: str, said: str, stt_ms: int, result: dict, tts_ms: int, first
            "stream": int(stream is not None), "first_sentence_ms": s.get("first_sentence_ms"),
            "ttft_ms": s.get("ttft_ms"), "hedged": int(bool(s.get("hedged"))) if stream is not None else "",
            "filler": int(bool(s.get("filler"))) if stream is not None else "", "answer_ms": s.get("answer_ms"),
+           "rag_mode": t.get("rag_mode") or "", "rag_ms": t.get("rag_ms") if t.get("rag_mode") else None,
+           "embed_ms": t.get("embed_ms"), "search_ms": t.get("search_ms"),
            "said": (said or "")[:80].replace("\t", " ")}
     try:
         path = HERE / "latency.log"
@@ -659,6 +683,42 @@ def _latency(kind: str, said: str, stt_ms: int, result: dict, tts_ms: int, first
 def _action(result: dict) -> str:
     act = result.get("actions")
     return f"\n[action] {json.dumps(act, ensure_ascii=False)}" if act else ""
+
+
+def _ms(value) -> str:
+    """An embedding time: 0 means it came from the cache."""
+    return "cached" if value == 0 else ("-" if value is None else f"{value} ms")
+
+
+def _cites(result: dict) -> str:
+    """The console line under a document answer: which passages it used."""
+    cx = result.get("cortex")
+    if not cx:
+        return ""
+    if cx.get("error"):
+        return f"\n[cortex] {cx.get('mode')}: no documents ({cx['error']})"
+    cites = result.get("citations") or []
+    if not cites:
+        if cx.get("passages"):
+            return f"\n[cortex] {cx.get('mode')}: {cx['passages']} passage(s) given, none cited (not saved)"
+        return f"\n[cortex] {cx.get('mode')}: nothing in the documents matched"
+    return f"\n[cortex] {cx.get('mode')}: " + "; ".join(
+        f"[{c['n']}] {c['filename']}" + (f" p.{c['page']}" if c.get("page") else "") + f" ({c['similarity']:.2f})"
+        for c in cites)
+
+
+def _citations_header(citations: list) -> str:
+    """X-Citations on a /say or /ask reply that wasn't streamed: compact ASCII JSON (a header can't be long).
+    A streamed reply's headers leave before the answer exists: its citations show in the console and on the
+    hosted page (cortex.answers) only."""
+    short = [{"n": c.get("n"), "document_id": c.get("document_id"), "filename": c.get("filename"),
+              "page": c.get("page"), "chunk_id": c.get("chunk_id")} for c in citations]
+    while short:
+        text = json.dumps(short, ensure_ascii=True, separators=(",", ":"))
+        if len(text) <= 1500:
+            return text
+        short = short[:-1]
+    return "[]"
 
 
 def _bitrate_bytes() -> float:
@@ -756,7 +816,7 @@ def run_test(a: Assistant, text: str | None, wav: str | None, music_state: str |
             print("[stt] nothing clear was heard")
             return
     result = a.think(text, music_state)
-    print(f"[gemini] {result['ms']} ms {_tools(result)}\nfriday> {result['reply']}{_action(result)}")
+    print(f"[gemini] {result['ms']} ms {_tools(result)}\nfriday> {result['reply']}{_action(result)}{_cites(result)}")
     t0 = time.time()
     backend, first, rest, _ms = a.voice_start(result["reply"])
     audio = first + b"".join(rest)
@@ -769,6 +829,13 @@ def run_test(a: Assistant, text: str | None, wav: str | None, music_state: str |
     print(f"[tts] wrote {HERE / name}; play it to hear Friday")
     a.after_turn(text, result)
     a.background.idle(60)
+
+
+def _documents_health():
+    """For /health: "off", "connecting", "unreachable", or how many documents are ready (RAM only)."""
+    import cortex
+
+    return cortex.status()
 
 
 def main() -> None:
@@ -784,6 +851,9 @@ def main() -> None:
         print("Can't start:\n  " + "\n  ".join(bad) + "\nCopy .env.example to .env and fill it in.")
         sys.exit(1)
 
+    import cortex
+
+    cortex.start()                             # connects and warms up in the background: never delays start-up
     try:
         assistant = Assistant(with_stt=not args.test)
     except Exception as exc:
@@ -791,6 +861,7 @@ def main() -> None:
         sys.exit(1)
 
     if args.test or args.test_wav:
+        cortex.wait_ready(8)                   # a one-off question: give the list of documents a moment
         try:
             run_test(assistant, args.test, args.test_wav, args.music)
         except TurnError as exc:

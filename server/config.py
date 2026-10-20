@@ -84,6 +84,20 @@ HISTORY_TURNS = _get_int("HISTORY_TURNS", 8)          # recent exchanges kept wo
 SESSION_GAP_MIN = _get_int("SESSION_GAP_MIN", 10)     # silence that starts a new conversation
 TIMEZONE = _get("TIMEZONE", "Asia/Kolkata")
 
+# --- Your documents (Cortex) ---------------------------------------
+# Documents are uploaded on the hosted Cortex page and stored in Supabase; Friday reads them
+# straight from the database. Empty = Cortex is off and Friday works exactly as before.
+# Use the SESSION pooler string (Supabase > Connect > Session pooler, port 5432).
+CORTEX_DATABASE_URL = _get("CORTEX_DATABASE_URL", "")
+CORTEX_TOP_K = _get_int("CORTEX_TOP_K", 4)                       # passages handed to Gemini per question
+CORTEX_MIN_SIMILARITY = _get_float("CORTEX_MIN_SIMILARITY", 0.5) # passages less similar than this are dropped
+CORTEX_TIMEOUT = _get_float("CORTEX_TIMEOUT", 2.5)               # seconds a turn waits for passages, at most
+CORTEX_INJECT = _get_bool("CORTEX_INJECT", True)     # obvious document questions: passages in the prompt, one round
+CORTEX_PREFETCH = _get_bool("CORTEX_PREFETCH", True) # other questions: search in the background in case Gemini asks
+CORTEX_LIST_S = _get_int("CORTEX_LIST_S", 60)                    # re-read the list of documents this often
+CORTEX_MAX_CHARS = _get_int("CORTEX_MAX_CHARS", 1200)            # per passage
+CORTEX_LOG_ANSWERS = _get_bool("CORTEX_LOG_ANSWERS", True)       # keep document answers in cortex.answers
+
 # --- Speech recognition (faster-whisper) ------------------------------
 WHISPER_MODEL = _get("WHISPER_MODEL", "base")
 WHISPER_LANGUAGE = _get("WHISPER_LANGUAGE", "en") or None

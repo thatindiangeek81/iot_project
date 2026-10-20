@@ -3,7 +3,7 @@
   chat()    OpenAI-compatible chat endpoint, with function tools (same endpoint the Worker uses)
   chat_stream()  the same, streamed: the first words arrive while the rest is still being written
   search()  native generateContent with the built-in Google Search tool
-  embed()   native embedContent, for memory similarity
+  embed()   native embedContent, for memory similarity and Cortex question embeddings
   warm()    keep the connection to Google open and alive (see keepalive_start)
 """
 
@@ -51,14 +51,17 @@ def _touch() -> None:
     _last_used = time.time()
 
 
-def _post(url: str, body: dict, headers: dict, timeout: float | None = None) -> dict:
+def _post(url: str, body: dict, headers: dict, timeout: float | None = None,
+          session: requests.Session | None = None) -> dict:
+    """`session`: another kept-alive session to send it on (Cortex has its own); default the shared one."""
     try:
-        r = _get_session().post(url, json=body, headers=headers, timeout=timeout or config.GEMINI_TIMEOUT)
+        r = (session or _get_session()).post(url, json=body, headers=headers, timeout=timeout or config.GEMINI_TIMEOUT)
     except requests.Timeout:
         raise GeminiError("gemini timed out", 504) from None
     except requests.RequestException as exc:
         raise GeminiError(f"could not reach gemini: {exc}", 502) from None
-    _touch()
+    if session is None:
+        _touch()
     if r.status_code == 429:
         raise GeminiError("gemini rate limit hit, try again shortly", 429)
     if r.status_code != 200:
@@ -553,14 +556,19 @@ def search(query: str) -> str:
 
 # ---------------------------------------------------------------- embeddings
 
-def embed(text: str) -> list[float]:
-    """Unit-length embedding of `text` (EMBED_DIMS numbers)."""
+def embed(text: str, task_type: str | None = None, dims: int | None = None, model: str | None = None,
+          session: requests.Session | None = None, timeout: float = 10) -> list[float]:
+    """Unit-length embedding of `text` (EMBED_DIMS numbers, or `dims`).
+    Memory calls it with no options, as it always has. Cortex asks for task_type="RETRIEVAL_QUERY",
+    dims=768 and model="gemini-embedding-001" (what its documents were embedded with), on its own session."""
     body = {
         "content": {"parts": [{"text": text[:2000]}]},
-        "outputDimensionality": config.EMBED_DIMS,
+        "outputDimensionality": dims or config.EMBED_DIMS,
     }
-    data = _post(f"{config.GEMINI_BASE}/models/{config.GEMINI_EMBED_MODEL}:embedContent",
-                 body, _native_headers(), timeout=10)
+    if task_type:
+        body["taskType"] = task_type
+    data = _post(f"{config.GEMINI_BASE}/models/{model or config.GEMINI_EMBED_MODEL}:embedContent",
+                 body, _native_headers(), timeout=timeout, session=session)
     values = (data.get("embedding") or {}).get("values")
     if not isinstance(values, list) or not values:
         raise GeminiError("no embedding in the reply", 502)

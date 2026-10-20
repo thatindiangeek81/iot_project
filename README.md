@@ -17,6 +17,8 @@ ESP32-S3 ── Wi-Fi ──▶ server/   laptop: Whisper · Gemini · memory ·
 | [`server/`](server) | The laptop brain in Python: hearing, Gemini + tools, memory, voice, music library |
 | [`worker/`](worker) | Cloudflare Worker used as the backup brain |
 | [`db/`](db) | PostgreSQL + Adminer in Docker: Friday's memory |
+| [`cortex-web/`](cortex-web) | Cortex upload side, hosted on Vercel: upload page + ingest (parse, chunk, embed into Supabase pgvector). See [`docs/cortex.md`](docs/cortex.md) |
+| [`Cortex/`](Cortex) | The original Cortex RAG project; its parser was reused in `cortex-web/`. Friday no longer calls it |
 | [`docs/`](docs) | Architecture overview and [why replies take the time they do](docs/latency.md) |
 
 ## Getting started

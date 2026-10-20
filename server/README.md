@@ -29,6 +29,7 @@ S3 --(Wi-Fi, HTTP)--> friday-local --> faster-whisper   (hearing, on the laptop)
 | "Pause" / "Resume" / "Next song" / "Go back" / "Stop" / "Louder" / "Volume 40" | `music_control` |
 | "Play Tum Hi Ho next" | Queues it after the current song |
 | "I added some songs" | Indexes new files in the music folder (`check_new_music`) |
+| "What do my biology notes say about mitochondria?" / "How do I reset the router, it's in the manual" | Answers from the documents you uploaded to Cortex and says which one, and which page, it came from |
 | Normal chat | She remembers the last 8 exchanges; after 10 minutes of silence a new conversation starts and the old one is summarised |
 
 She also **learns by herself**: after each reply, a background job asks Gemini whether you
@@ -181,6 +182,119 @@ the speaker receives it (`song.mp3`).
 Music needs the laptop: when the S3 falls back to the Cloudflare Worker, Friday says she
 can't play music right now.
 
+## Your documents (Cortex)
+
+Friday can answer from your own PDFs, Word and text files, and says where the answer came from
+("your biology notes, page three, say..."). The design and the numbers behind it are in
+[`docs/cortex.md`](../docs/cortex.md).
+
+```
+UPLOAD (any browser)                                    ASK (this laptop)
+Cortex upload page (Vercel) ── file ──▶ Supabase        question ─▶ friday-local
+   parse ▸ chunk ▸ Gemini embeddings ──▶ cortex.chunks       │  about your documents? (a local check, microseconds)
+                                          ▲                   ├─ yes: embed the question + cortex.search() ─▶ passages
+                                          └─ one SQL call ────┤       in the prompt ─▶ Gemini answers in ONE round
+                                                              └─ no: search in the background, offer search_documents
+```
+
+**Uploading** happens on the hosted Cortex page (password protected), not here. A document can be asked about
+once the page shows it as *ready*; Friday re-reads the list every `CORTEX_LIST_S` seconds (60).
+
+**Connecting Friday** (once): in Supabase open *Connect*, copy the **Session pooler** string (port 5432, not the
+transaction pooler on 6543), put the database password in it and set it in `.env`:
+
+```
+CORTEX_DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
+```
+
+TLS (`sslmode=require`) is added for you. At start-up friday-local connects in the background (it never delays
+start-up) and prints `[cortex] 3 document(s) ready` and `[cortex] ready in ... ms`. `/health` shows
+`"documents": 3`, or `"off"` / `"connecting"` / `"unreachable"`. Leave the setting empty and Cortex is off: no
+connection, no extra prompt text, Friday works exactly as before.
+
+**How Friday decides.** Each question first goes through a quick local check: phrases like *my notes*, *the
+manual*, *the pdf*, *according to my notes*, *what does the manual say*, or a distinctive word from one of your
+documents' names or subjects used as a reference ("the router", "in biology" for `Router_Manual.txt` and
+`biology-notes.pdf`). "How do routers work" or "what does the fox say" don't count: those go the tool way.
+
+- *Yes* (the **inject** path): the question is embedded and searched while her memory builds the prompt, and the
+  best passages go straight into Gemini's instructions, so she answers in one round. If nothing is similar enough,
+  Gemini is told so and she says she couldn't find it in your documents.
+- *No* (the **tool** path): she gets a `search_documents` tool and the list of your documents, and the same search
+  starts in the background as the question arrives (**prefetch**). If Gemini decides to look, the tool hands back
+  the prefetched passages at once instead of searching again, as long as she's looking for the same thing. A
+  follow-up ("tell me more about that one") or a named document is searched with her own wording.
+- If the database or Gemini's embedding fails, or takes longer than `CORTEX_TIMEOUT` (2.5 s), she answers without
+  the documents and says she couldn't reach them. A document problem never breaks a normal answer. A database call
+  that runs out of time is cancelled and its connection replaced, and if the database stops answering altogether
+  Cortex is marked unreachable within a few seconds, so later questions don't wait for it.
+
+**Citations.** Gemini marks each fact with the number of the passage it came from (`[1]`) and names the source once
+in words. The markers are never spoken (they're removed before the voice, also when a marker arrives split across
+pieces of a streamed reply). Which passages count as cited: the ones she marked; if she marked none, on the
+inject path none (she didn't use them: the question only looked like a document question), on the tool path all the
+passages the search returned. Where they show:
+
+- the console, under the reply (`[cortex] inject: [1] biology-notes.pdf p.3 (0.82)`);
+- `/chat` and `/ask?debug=1` JSON, as `citations`;
+- the `X-Citations` header of a `/say` or `/ask` reply that **isn't** streamed. A streamed reply (the default, what
+  the speaker gets) sends its headers before the answer exists, so it has no citations: for those, the console and
+  the upload page are the place to look, and she says the source out loud;
+- the upload page's *Recent answers*: each answer that cited something (and had no error) is saved to
+  `cortex.answers` by a small background worker of its own, with links to the cited pages. `X-No-Log: 1` skips it,
+  like the history.
+
+**Check it without the speaker:**
+
+```
+python cortex.py                                          what Cortex has
+python cortex.py "what is the function of mitochondria"   what a question finds, its similarities, and how long it took
+python server.py --test "what do my biology notes say about mitochondria"
+```
+
+| Setting | Default | Does |
+|---|---|---|
+| `CORTEX_DATABASE_URL` | empty | Supabase session pooler string. Empty = Cortex off |
+| `CORTEX_TOP_K` | `4` | Passages handed to Gemini per question |
+| `CORTEX_MIN_SIMILARITY` | `0.5` | Passages less similar than this (0 to 1) are left out. Lower it if she says she can't find things that are there; raise it if she quotes passages that don't fit. `python cortex.py "question"` lists every candidate's similarity, including those below the threshold |
+| `CORTEX_TIMEOUT` | `2.5` | Seconds a question waits for its passages at most |
+| `CORTEX_INJECT` | `1` | `0` = never put passages in the prompt up front; Gemini always decides with the tool (a second round) |
+| `CORTEX_PREFETCH` | `1` | `0` = search only when Gemini asks; questions then go to Google's embedding API only when they're about your documents |
+| `CORTEX_LIST_S` | `60` | How often the list of documents is re-read |
+| `CORTEX_MAX_CHARS` | `1200` | Characters per passage |
+| `CORTEX_LOG_ANSWERS` | `1` | Save document answers to `cortex.answers` |
+
+**Speed.** A question the check catches costs about 0.2-0.4 s more than an ordinary one (embedding the question at
+Google, then one database call to Mumbai, both on connections that are kept open), instead of a whole second Gemini
+round. An ordinary question costs nothing extra in time: the check takes microseconds and the prefetch runs in the
+background.
+
+**The prefetch and your embedding quota.** While you have documents, almost every question of three or more words
+("what's the weather like", "tell me a joke about cats") is sent once to Gemini's embedding API in the background, in
+case Gemini decides to search. That uses the same Gemini embedding quota as your uploads (the free tier has a daily
+limit). `CORTEX_PREFETCH=0` turns it off: then a question goes to the embedding API only when it is about your
+documents (the check said so, or Gemini called the tool), and a tool search costs about 0.3 s more.
+The `[latency]` line and `latency.log` say how long each question waited for the documents (`rag_mode`, `rag_ms`,
+`embed_ms`, `search_ms`).
+
+**Privacy.** Your documents live in your Supabase project (Mumbai), not on this laptop. Friday reads them with the
+database password in `.env`; the browser never sees a Supabase key. The few passages that match a question go to
+Gemini with that question, like your memories do. With `CORTEX_PREFETCH=1` (the default) and documents uploaded,
+almost every question of three or more words also goes to Gemini's embedding API; with `CORTEX_PREFETCH=0` only
+questions about your documents do. Text inside a document is treated as reference, never as instructions, and it
+can't break out of the passage markers it is given to Gemini in.
+
+**If it doesn't work:**
+
+| Problem | Fix |
+|---|---|
+| `[cortex] can't reach postgresql://...` at start-up | Wrong password, or the transaction pooler (6543) instead of the session pooler (5432), or the Supabase project is paused (free projects pause after a week unused: open the dashboard to wake it). Friday keeps trying every 10 s |
+| `"documents": 0` | Nothing is *ready* yet: check the upload page; documents still processing aren't searched |
+| She says she can't find something that's there | Lower `CORTEX_MIN_SIMILARITY` (try 0.4), or ask with "my notes" / the document's name so the check catches it |
+| `[cortex] no passages within 2.5 s` | The network to Google or Mumbai is slow; raise `CORTEX_TIMEOUT` a little |
+| `[cortex] search-3 didn't answer in time: cancelled, closed and replaced` | A database call hung (a network that drops traffic). Friday has already replaced the connection; if it keeps happening, `/health` will show `"unreachable"` until the line recovers |
+| `[cortex] embedding failed: gemini rate limit hit` | Too many questions for the free embedding quota: set `CORTEX_PREFETCH=0` so only document questions are embedded |
+
 ## Speed
 
 Every question prints where its time went, and the same numbers go into `latency.log`
@@ -265,12 +379,17 @@ is renamed to `latency.<date>.log` and a new one is started.)
 | `hedged` | Streamed only: 1 = the first word took so long that Friday asked again |
 | `filler` | Streamed only: 1 = a filler line was spoken while a tool ran |
 | `answer_ms` | Streamed only: when the answer itself started to sound: the first audio of the last round that was heard, so not the filler and not something said before a tool call |
+| `rag_mode` | How the documents were used: `inject` (passages in the prompt, waited for before Gemini), `prefetch` (the tool answered from the background search), `tool` (the tool searched when asked); empty = not used |
+| `rag_ms`, `embed_ms`, `search_ms` | How long the question waited for the documents (for `inject` before Gemini, otherwise inside `tool_ms`), and of that search, the question's embedding (`0` = cached) and the database call |
 
 ## Privacy
 
-Recordings, transcripts and memories stay on this laptop. What leaves it: the text of
-each question (plus the profile and relevant memories) goes to Gemini, and each memory is
-sent once to Gemini's embedding API to index it. Passwords, PINs and card numbers are refused.
+Recordings, transcripts and memories stay on this laptop; your uploaded documents live in your own Supabase
+project (see [Your documents](#your-documents-cortex)). What leaves the laptop: the text of each question (plus the
+profile, relevant memories and any matching document passages) goes to Gemini, each memory is sent once to Gemini's
+embedding API to index it, and while you have documents uploaded almost every question of three or more words is
+sent once to the embedding API too (the Cortex prefetch; with `CORTEX_PREFETCH=0` only questions about your
+documents). Passwords, PINs and card numbers are refused.
 
 ## If something fails
 
