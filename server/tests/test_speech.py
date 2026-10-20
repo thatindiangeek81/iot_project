@@ -281,6 +281,16 @@ class Stalling(unittest.TestCase):
         self.assertTrue(wait_until(lambda: edge.stopped == ["Hello there."]))
         self.assertEqual(datas(s), [])
 
+    def test_the_voice_that_went_quiet_is_told_so(self):
+        edge, local = self.hung_and_working()
+        told = []
+        edge.stalled = lambda: told.append("edge")
+        s = SpeechSession([edge, local], stall_s=0.2)
+        s.add("Hello there.")
+        self.assertTrue(wait_until(lambda: (s.poll(), s.peek())[1] is not None))
+        self.assertEqual(told, ["edge"])
+        edge.gate("Hello there.").set()
+
     def test_a_reader_that_is_already_taking_audio_moves_on_too(self):
         edge, local = self.hung_and_working()
         s = SpeechSession([edge, local], stall_s=0.2)
@@ -397,6 +407,79 @@ class EdgeVoiceCache(unittest.TestCase):
         self.assertEqual(os.listdir(self.dir.name), [])
 
 
+class EdgeVoiceHealth(unittest.TestCase):
+    """Does Microsoft's voice look reachable? A line from the voice cache is only a good way to start a reply if
+    it does: the cache makes Edge the voice of the whole reply, and if Edge is down the reply ends after that line."""
+
+    def setUp(self):
+        import sys
+        import types
+
+        import tts
+
+        self.tts = tts
+        self.mode = "ok"
+        outer = self
+
+        class Communicate:
+            def __init__(self, text, voice, rate=None, pitch=None, **kw):
+                pass
+
+            async def stream(self):
+                if outer.mode == "down":
+                    raise OSError("network is unreachable")
+                if outer.mode == "ok":
+                    yield {"type": "audio", "data": b"a" * 300}
+
+        patcher = mock.patch.dict(sys.modules, {"edge_tts": types.SimpleNamespace(Communicate=Communicate)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        for name, value in (("TTS_CACHE_DIR", self.dir.name), ("TTS_CACHE_MAX", 50)):
+            p = mock.patch.object(config, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.voice = tts._EdgeVoice.__new__(tts._EdgeVoice)
+
+    def speak(self, text="Hello there friend."):
+        got = []
+        self.voice.speak(text, got.append)
+        return got
+
+    def test_it_looks_up_until_a_request_fails_and_again_after_one_works(self):
+        self.assertTrue(self.voice.looks_up())
+        self.mode = "down"
+        with self.assertRaises(self.tts.TTSError):
+            self.speak()
+        self.assertFalse(self.voice.looks_up())
+        self.mode = "ok"
+        self.assertEqual(self.speak("Another one."), [b"a" * 300])
+        self.assertTrue(self.voice.looks_up())
+
+    def test_a_voice_that_returns_no_audio_looks_down(self):
+        self.mode = "empty"
+        with self.assertRaises(self.tts.TTSError):
+            self.speak()
+        self.assertFalse(self.voice.looks_up())
+
+    def test_a_line_from_the_cache_says_nothing_about_the_service(self):
+        self.mode = "down"
+        with self.assertRaises(self.tts.TTSError):
+            self.speak("A fresh one.")
+        self.tts._cache_store("Done, boss.", b"a" * 300)
+        self.assertEqual(self.speak("Done, boss."), [b"a" * 300])
+        self.assertFalse(self.voice.looks_up())
+
+    def test_a_sentence_that_was_stopped_says_nothing_either(self):
+        def stop(data):
+            raise speech.Stop()
+
+        with self.assertRaises(speech.Stop):
+            self.voice.speak("Hello there friend.", stop)
+        self.assertTrue(self.voice.looks_up())
+
+
 class LocalVoice(unittest.TestCase):
     def test_one_piece_of_16_bit_audio(self):
         import numpy as np
@@ -425,6 +508,18 @@ class TtsSession(unittest.TestCase):
             s = t.session()
         self.assertEqual([v.name for v in s._voices], ["edge", "local"])
         self.assertEqual(s._parallel, 2)
+
+    def test_the_filler_is_only_fine_while_the_first_voice_looks_up(self):
+        import tts
+
+        t = tts.TTS.__new__(tts.TTS)
+        edge, t.local = FakeVoice("edge"), FakeVoice("local", fmt="pcm")
+        t.edge = edge
+        self.assertTrue(t.filler_ok())                      # a voice that keeps no track is taken as fine
+        edge.looks_up = lambda: False
+        self.assertFalse(t.filler_ok())
+        t.edge = None                                       # only the laptop's own voice: no cache is involved
+        self.assertTrue(t.filler_ok())
 
 
 if __name__ == "__main__":

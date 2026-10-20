@@ -254,6 +254,7 @@ class SpeechSession:
             return False
         print(f"[tts] {getattr(item.current, 'name', 'the voice')} has said nothing for {self._stall_s:g} s; "
               f"making the sentence with another voice")
+        self._tell_stalled(item)
         item.skip = gone
         item.current = None
         item.gen += 1                          # whatever the old request still does is ignored
@@ -264,8 +265,19 @@ class SpeechSession:
         self._pump()
         return True
 
+    @staticmethod
+    def _tell_stalled(item: _Item) -> None:
+        """A voice that keeps track of its own health (Edge) is told that a request to it went unanswered."""
+        tell = getattr(item.current, "stalled", None)
+        if tell is not None:
+            try:
+                tell()
+            except Exception:
+                pass
+
     def _give_up(self, item: _Item) -> None:
         """With the lock held: this sentence is not going to be made."""
+        self._tell_stalled(item)
         item.error = VoiceError("the voice stalled")
         item.finished = True
         item.dropped = True

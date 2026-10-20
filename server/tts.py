@@ -138,6 +138,7 @@ class _EdgeVoice:
 
     provider = PROVIDER_EDGE
     fmt = "mp3"
+    _up = True                         # did the last live request to Microsoft work? (none made yet: yes)
 
     def __init__(self) -> None:
         try:
@@ -145,6 +146,14 @@ class _EdgeVoice:
         except ImportError as exc:
             raise TTSError("edge-tts is not installed (pip install edge-tts)") from exc
         self.name = f"edge {config.EDGE_VOICE}"
+
+    def looks_up(self) -> bool:
+        """Does Microsoft's service look reachable? Only live requests tell: a line from the voice cache doesn't."""
+        return self._up
+
+    def stalled(self) -> None:
+        """A request went unanswered for too long and was given up on: treat the service as down until one works."""
+        self._up = False
 
     def audio(self, text: str) -> bytes:
         import asyncio
@@ -163,13 +172,18 @@ class _EdgeVoice:
         try:
             data = asyncio.run(asyncio.wait_for(run(), timeout=config.EDGE_TIMEOUT))
         except asyncio.TimeoutError:
+            self._up = False
             raise TTSError("edge voice timed out") from None
         except TTSError:
+            self._up = False
             raise
         except Exception as exc:  # network down, service changed...
+            self._up = False
             raise TTSError(f"edge voice failed: {exc}") from None
         if len(data) < 200:
+            self._up = False
             raise TTSError("edge voice returned no audio")
+        self._up = True
         return data
 
     def speak(self, text: str, put) -> None:
@@ -208,12 +222,18 @@ class _EdgeVoice:
 
         try:
             asyncio.run(asyncio.wait_for(run(), timeout=config.EDGE_TIMEOUT + 30))
+        except Stop:
+            raise                              # the sentence wasn't wanted any more: says nothing about the service
         except asyncio.TimeoutError:
+            self._up = False
             raise TTSError("edge voice timed out") from None
-        except (TTSError, Stop):
+        except TTSError:
+            self._up = False
             raise
         except Exception as exc:  # network down, service changed...
+            self._up = False
             raise TTSError(f"edge voice failed: {exc}") from None
+        self._up = True
 
     def _start(self, text: str):
         """Begin synthesising `text` in the background; returns the queue its MP3 chunks arrive on."""
@@ -457,6 +477,14 @@ class TTS:
                 errors.append(f"{backend.name}: {exc}")
                 print(f"[tts] {backend.name} failed ({exc}); trying the next voice")
         raise TTSError("; ".join(errors))
+
+    def filler_ok(self) -> bool:
+        """May a reply begin with a line from the voice cache? Such a line comes from Edge, and then Edge has to
+        say the rest of the reply too (MP3 and PCM can't be mixed): if it looks unreachable, better to start
+        with whichever voice does work."""
+        chain = self.chain()
+        check = getattr(chain[0], "looks_up", None) if chain else None
+        return True if check is None else bool(check())
 
     def session(self, cond=None):
         """A SpeechSession: add() sentences as they are written and read their audio back in order."""
