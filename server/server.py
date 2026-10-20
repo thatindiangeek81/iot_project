@@ -612,12 +612,21 @@ def _latency(kind: str, said: str, stt_ms: int, result: dict, tts_ms: int, first
         line = (f"[latency] {first_audio_ms} ms to first audio = hearing {stt_ms} + memory/prompt "
                 f"{t.get('prompt_ms', 0)} + Gemini {gemini}"
                 f"{' (quick reply)' if t.get('fast') else ''} + tools {t.get('tool_ms', 0)} + voice {tts_ms}")
+    elif s.get("filler"):
+        # The first audio was the filler line, said once Gemini's first round (the one that asked for the tool)
+        # was over; the first sentence of the answer came after the tool.
+        line = (f"[latency] {first_audio_ms} ms to first audio (streamed, the filler {s['filler']!r}) = hearing "
+                f"{stt_ms} + memory/prompt {t.get('prompt_ms', 0)} + Gemini's first round "
+                f"{rounds[0] if rounds else 0} + voice {tts_ms}; the answer itself from {s.get('answer_ms')} ms "
+                f"(Gemini {s.get('first_sentence_ms')} to its first sentence, first word {s.get('ttft_ms')}"
+                f"{', retried' if s.get('hedged') else ''}); Gemini {gemini} and tools {t.get('tool_ms', 0)} in all")
     else:
+        held = first_audio_ms - stt_ms - (s.get("first_sentence_ms") or 0) - tts_ms
         line = (f"[latency] {first_audio_ms} ms to first audio (streamed) = hearing {stt_ms} + Gemini "
                 f"{s.get('first_sentence_ms')} to the first sentence (memory/prompt {t.get('prompt_ms', 0)}, "
                 f"first word {s.get('ttft_ms')}{', retried' if s.get('hedged') else ''}) + voice {tts_ms}")
-        if s.get("filler"):
-            line += f"; said {s['filler']!r} while the tool ran"
+        if held > 150:                      # the reply waited to see whether a tool call followed (or for a voice)
+            line += f" + held back {held}"
         line += (f"; the answer itself from {s.get('answer_ms')} ms; "
                  f"Gemini {gemini} and tools {t.get('tool_ms', 0)} in all")
     print(line)

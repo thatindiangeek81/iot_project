@@ -118,6 +118,27 @@ class Normal(Base):
         self.assertGreaterEqual(r.answer_ms, 700)
         self.assertIs(r.voice, self.voice)
 
+    def test_the_header_time_counts_from_the_sentence_that_is_spoken_not_one_that_was_thrown_away(self):
+        r = self.make()
+        r.sentence("Let me look that up.")                    # said before the tool call: thrown away
+        r.round_end(False, ["get_weather"], slow=False)
+        time.sleep(0.4)                                        # the tool runs
+        r.sentence("It is sunny today.")
+        r.round_end(True)
+        self.finish_ok()
+        self.assertGreaterEqual(self.header.calls[0]["chat_ms"], 350)
+
+    def test_the_answer_time_is_that_of_the_final_round_not_of_something_said_before_the_tool(self):
+        r = self.make(hold_s=0.05)
+        r.sentence("Let me look that up.")
+        self.assertTrue(wait_until(self.started))              # it was heard...
+        r.round_end(False, ["get_weather"], slow=False)
+        time.sleep(0.4)                                        # ...and then the tool ran
+        r.sentence("It is sunny today.")
+        r.round_end(True)
+        self.finish_ok()
+        self.assertGreaterEqual(r.answer_ms - r.first_audio_ms, 350)
+
     def test_actions_ride_in_the_header(self):
         r = self.make(actions={"music": "play", "track": 12})
         r.sentence("Here's Kesariya.")

@@ -55,7 +55,8 @@ class StreamingReply:
         self._spoken: list[str] = []           # sentences already on their way to the speaker
         self._draft: list[str] = []            # the round being written now
         self._t_draft = None                   # when its first sentence came
-        self._t_first_sentence = None
+        self._round = 0                        # which round of Gemini's writing (a tool call ends one)
+        self._round_audio: dict[int, int] = {}      # round -> ms until its first audio was sent
         self._final = False                    # the round that is the answer has ended
         self._finished = False                 # the brain is done (or has failed)
         self._failed = False                   # it failed before anything was sent
@@ -71,7 +72,6 @@ class StreamingReply:
         self.filler: str | None = None
         self.tools_ran = False                 # a round ended in tool calls: they have run, or are about to
         self.first_audio_ms: int | None = None      # from the end of the question to the first audio sent
-        self.answer_ms: int | None = None           # ... to the first audio of the answer itself (not the filler)
         self.chat_ms: int | None = None
         self.tts_ms: int | None = None              # how long the first sentence took to become audio
         self.audio = bytearray()                    # everything sent, to save as last_reply
@@ -85,10 +85,8 @@ class StreamingReply:
             now = self._clock()
             if not self._draft:
                 self._t_draft = now
-            if self._t_first_sentence is None:
-                self._t_first_sentence = now
             self._draft.append(text)
-            self.session.add(text)
+            self.session.add(text, tag=self._round)
             self.cv.notify_all()
 
     def round_end(self, final: bool, tools=(), slow: bool = False) -> None:
@@ -106,6 +104,7 @@ class StreamingReply:
                 self.session.drop_unsent()
             self._draft = []
             self._t_draft = None
+            self._round += 1
             if (slow and not self._decided and self._fillers and not (self.dead or self._voice_dead)
                     and (self._filler_ok is None or self._filler_ok())):
                 line = self._pick_filler()
@@ -119,6 +118,13 @@ class StreamingReply:
         """The brain asks this between chunks: stop if nobody can hear the rest (the speaker hung up, or the voice
         failed part way through). A voice that never worked at all is not this: the caller still wants the text."""
         return self.dead or self._stopped
+
+    @property
+    def answer_ms(self) -> int | None:
+        """From the end of the question to the first audio of the answer itself: that of the last round that was
+        heard, so neither the filler nor something said before a tool was called."""
+        rounds = dict(self._round_audio)
+        return rounds[max(rounds)] if rounds else None
 
     def music_ok(self) -> bool:
         with self.cv:
@@ -204,7 +210,7 @@ class StreamingReply:
                 if ready is not None and (self._decided or self._gate_open()):
                     self._decided = True
                     self.voice, self.tts_ms = ready
-                    first = self._t_first_sentence or self._clock()
+                    first = self._t_draft if self._t_draft is not None else self._clock()
                     self.chat_ms = int((first - self._t0) * 1000)
                     return self._build_header(self.voice, " ".join(self._spoken + self._draft), self.chat_ms,
                                               self.tts_ms, self._get_actions())
@@ -225,8 +231,8 @@ class StreamingReply:
                     self.first_audio_ms = self._since_start_ms()
                 else:
                     self._transport.write(data)
-                if first and tag != FILLER and self.answer_ms is None:
-                    self.answer_ms = self._since_start_ms()
+                if first and isinstance(tag, int):
+                    self._round_audio.setdefault(tag, self._since_start_ms())
                 self.audio += data
             if self.started:
                 if self.session.error is not None:

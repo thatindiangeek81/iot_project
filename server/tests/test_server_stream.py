@@ -1,6 +1,7 @@
 """The whole streamed turn over real HTTP: the server, the brain, the voice and the frame the speaker reads,
 with only Gemini, the voice and the database replaced."""
 
+import contextlib
 import http.client
 import io
 import json
@@ -459,6 +460,32 @@ class LatencyLog(unittest.TestCase):
         self.assertEqual((streamed["stream"], streamed["first_sentence_ms"], streamed["ttft_ms"], streamed["filler"],
                           streamed["answer_ms"], streamed["hedged"]), ("1", "900", "450", "1", "3900", "0"))
         self.assertTrue(all(len(r) == len(server.LATENCY_COLUMNS) for r in rows))
+
+    def console(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            server._latency(*args)
+        return out.getvalue()
+
+    def test_the_console_line_for_a_turn_that_started_with_a_filler(self):
+        line = self.console("spoken", "weather", 700, self.result, 20, 1900,
+                            {"first_sentence_ms": 3100, "ttft_ms": 450, "hedged": False,
+                             "filler": "One sec, boss.", "answer_ms": 3900})
+        self.assertIn("1900 ms to first audio", line)
+        self.assertIn("the filler 'One sec, boss.'", line)
+        self.assertIn("Gemini's first round 900", line)          # what came before the filler
+        self.assertIn("the answer itself from 3900 ms", line)
+        self.assertNotIn("to the first sentence", line)          # the first audio was not that sentence
+
+    def test_the_console_line_adds_up_when_the_reply_was_held_back(self):
+        line = self.console("spoken", "play something", 700, self.result, 1500, 4000,
+                            {"first_sentence_ms": 900, "ttft_ms": 450, "hedged": False, "filler": None,
+                             "answer_ms": 4000})
+        self.assertIn("held back 900", line)                     # 4000 - 700 - 900 - 1500
+        quiet = self.console("spoken", "hi", 700, self.result, 1500, 3200,
+                             {"first_sentence_ms": 900, "ttft_ms": 450, "hedged": False, "filler": None,
+                              "answer_ms": 3200})
+        self.assertNotIn("held back", quiet)
 
     def test_an_older_log_with_other_columns_is_kept_aside(self):
         with open(self.path, "w", encoding="utf-8") as f:
