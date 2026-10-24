@@ -15,6 +15,7 @@ server/last_question.wav
 server/last_reply.wav
 server/last_reply.mp3
 server/latency*.log
+server/wake_test.log
 server/voice_cache/
 server/music_cache/
 server/.songlist.txt
