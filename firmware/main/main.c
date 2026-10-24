@@ -48,6 +48,7 @@ static int16_t *s_record;             // spoken question, lives in PSRAM
 // back once the answer has finished playing.
 static SemaphoreHandle_t s_turn;
 static QueueHandle_t     s_voice_q;   // recorded sample counts, main -> assistant
+static QueueHandle_t     s_wake_q;    // wake ids from the laptop's ears, ears -> assistant
 
 // ---------------------------------------------------------------- push-to-talk
 
@@ -328,11 +329,11 @@ static void laptop_turn(int wake_id)
 
 // ---------------------------------------------------------------- the laptop's ears (LAPTOP_MIC 1)
 //
-// Waits for the laptop to hear the wake word, then takes the turn and plays the answer.
-// It only asks while no turn is running: the laptop takes each new poll to mean "the
-// speaker has finished talking", and only then listens for the wake word again.
-
-static void prompt(void);
+// Waits for the laptop to hear the wake word, then takes the turn and hands it to the
+// assistant task, which plays the answer (like BOOT hands over a recording). It only
+// asks while no turn is running: the laptop takes each new poll to mean "the speaker
+// has finished talking", and only then listens for the wake word again.
+// Its 8 KB stack is enough for the small long poll; the answer is decoded elsewhere.
 
 static void ears_task(void *arg)
 {
@@ -348,9 +349,7 @@ static void ears_task(void *arg)
         if (wake == 0 || xSemaphoreTake(s_turn, 0) != pdTRUE) {
             continue;                              // nothing yet, or a typed / BOOT turn got there first
         }
-        laptop_turn(wake);
-        xSemaphoreGive(s_turn);
-        prompt();
+        xQueueSend(s_wake_q, &wake, portMAX_DELAY);   // the assistant gives s_turn back when it's done
     }
 }
 
@@ -375,8 +374,9 @@ static bool laptop_press(void)
 
 // ---------------------------------------------------------------- assistant task
 //
-// The only task that talks to the server (laptop or Worker). It watches the keyboard and the
-// push-to-talk queue together, and runs one turn at a time.
+// The task that runs every turn (laptop or Worker): it watches the keyboard, the push-to-talk
+// queue and the laptop's wakes together, and runs one turn at a time. (The ears task only
+// waits for the wake word, on a connection of its own.)
 
 static void prompt(void)
 {
@@ -401,6 +401,13 @@ static void assistant_task(void *arg)
         TickType_t wait = typed ? pdMS_TO_TICKS(50) : 0;
         if (xQueueReceive(s_voice_q, &samples, wait) == pdTRUE) {
             voice_turn(samples);              // main handed us s_turn with it
+            xSemaphoreGive(s_turn);
+            prompt();
+            continue;
+        }
+        int wake;
+        if (s_wake_q && xQueueReceive(s_wake_q, &wake, 0) == pdTRUE) {
+            laptop_turn(wake);                // the ears task handed us s_turn with it
             xSemaphoreGive(s_turn);
             prompt();
             continue;
@@ -479,13 +486,15 @@ void app_main(void)
     // scratch on the stack for each frame.
     xTaskCreate(assistant_task, "friday", 32768, NULL, 5, NULL);
     if (LAPTOP_MIC) {
-        // 32 KB like the assistant: it plays answers too (the MP3 decoder's scratch is on the stack).
-        xTaskCreate(ears_task, "ears", 32768, NULL, 5, NULL);
+        s_wake_q = xQueueCreate(1, sizeof(int));
+        if (s_wake_q) {
+            xTaskCreate(ears_task, "ears", 8192, NULL, 5, NULL);
+        }
     }
 
     for (;;) {
         if (ptt_down()) {
-            if (LAPTOP_MIC && laptop_press()) {
+            if (LAPTOP_MIC && s_wake_q && laptop_press()) {
                 while (ptt_down()) {              // no holding needed: the laptop listens until you stop
                     vTaskDelay(pdMS_TO_TICKS(20));
                 }

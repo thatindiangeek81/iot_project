@@ -130,7 +130,7 @@ friday> Got it, boss. The spare key is in the kitchen drawer.
 
 | File | What it does |
 |---|---|
-| `main/main.c` | The main loop records while BOOT is held (with `LAPTOP_MIC`: asks the laptop to listen); one **assistant task** (32 KB stack) runs typed and push-to-talk turns, the **ears task** (32 KB) the laptop-mic turns; one turn at a time |
+| `main/main.c` | The main loop records while BOOT is held (with `LAPTOP_MIC`: asks the laptop to listen); one **assistant task** (32 KB stack) runs every turn, typed, push-to-talk or from the laptop's mic, one at a time; the small **ears task** (8 KB) only waits for the wake word |
 | `main/cloud.c/.h` | HTTP(S) client for the laptop or the Worker (same protocol). `cloud_ask()` uploads a recording, `cloud_say()` a typed question, `cloud_listen_answer()` fetches what the laptop's mic heard; all parse the reply frame as it arrives and hand audio to the speaker. `cloud_listen_wait()` is the wake-word long poll, `cloud_listen_press()` the BOOT button |
 | `main/net.c/.h` | Wi-Fi, laptop discovery, the quick reachability check |
 | `main/textin.c/.h` | Reads typed lines from the serial monitor without blocking push-to-talk |
