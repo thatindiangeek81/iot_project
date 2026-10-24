@@ -105,6 +105,35 @@ WHISPER_DEVICE = _get("WHISPER_DEVICE", "cpu")        # cpu | cuda (falls back t
 WHISPER_COMPUTE = _get("WHISPER_COMPUTE", "int8")     # int8 on cpu, int8_float16 on cuda
 WHISPER_HINT = _get("WHISPER_HINT", "A person talking to a voice assistant named Friday.")
 
+# --- The laptop's ears: its own mic, a wake word, end-of-speech ---------
+# While the speaker's own mic is a noisy MAX4466, the laptop listens instead: it waits for the wake word,
+# records until you stop talking and sends the answer to the speaker (which asks for it with GET /listen).
+EARS = _get_bool("EARS", True)                       # 0 = no laptop mic (push-to-talk on the S3 only)
+MIC_DEVICE = _get("MIC_DEVICE", "")                  # part of the mic's name, or its number; blank = Windows default
+# A built-in openWakeWord phrase (hey_jarvis, alexa, hey_mycroft) or the path of your own model,
+# e.g. models/hey_friday.onnx (relative to this folder). Only that phrase wakes her, not other sounds.
+WAKE_MODEL = _get("WAKE_MODEL", "hey_jarvis")
+WAKE_THRESHOLD = _get_float("WAKE_THRESHOLD", 0.6)   # 0..1: higher = fewer false wakes, more misses
+WAKE_COOLDOWN_S = _get_float("WAKE_COOLDOWN_S", 0.8) # deaf this long after she stops talking (her echo)
+WAKE_DEBUG = _get_bool("WAKE_DEBUG", False)          # print near-misses (scores from 0.3 up) to tune the threshold
+EARS_START_S = _get_float("EARS_START_S", 5.0)       # after the wake word, give up if you haven't started talking
+EARS_SILENCE_MS = _get_int("EARS_SILENCE_MS", 800)   # this much silence = you've finished
+EARS_MAX_S = _get_float("EARS_MAX_S", 12.0)          # longest question
+EARS_VAD_THRESHOLD = _get_float("EARS_VAD_THRESHOLD", 0.5)  # 0..1: how sure the speech detector must be
+LISTEN_HOLD_S = _get_int("LISTEN_HOLD_S", 20)        # an idle GET /listen is held this long, then answered 204
+
+# --- Local commands (no Gemini) ----------------------------------------
+# "pause", "next song", "volume 40", "play Kesariya", "what's playing", "what time is it" are answered on the
+# laptop in milliseconds: no tokens, no Gemini round trip. Anything else goes to Gemini as before.
+LOCAL_COMMANDS = _get_bool("LOCAL_COMMANDS", True)
+# A small sentence-embedding model (all-MiniLM-L6-v2, ~90 MB, downloaded once) also catches other wordings:
+# "turn it down a bit", "skip this one". 0 = exact phrases only.
+INTENT_MODEL = _get_bool("INTENT_MODEL", True)
+INTENT_MODEL_REPO = _get("INTENT_MODEL_REPO", "sentence-transformers/all-MiniLM-L6-v2")
+INTENT_MIN_SIMILARITY = _get_float("INTENT_MIN_SIMILARITY", 0.8)  # 0..1; python intents.py "..." shows the scores
+INTENT_MARGIN = _get_float("INTENT_MARGIN", 0.05)    # the best command must beat the next best by this much
+INTENT_MAX_WORDS = _get_int("INTENT_MAX_WORDS", 8)   # longer sentences always go to Gemini
+
 # --- Text to speech ---------------------------------------------------
 # edge  = Microsoft neural voice online (EDGE_VOICE), local voice as backup
 # local = Piper or the Windows voice only (fully offline)
