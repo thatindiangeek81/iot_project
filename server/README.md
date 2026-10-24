@@ -18,6 +18,7 @@ S3 --(Wi-Fi, HTTP)--> friday-local --> faster-whisper   (hearing, on the laptop)
 
 | Say | What happens |
 |---|---|
+| "Hey Jarvis" (near the laptop), then your question | The laptop's mic hears the wake word, records until you stop and the speaker answers ([the laptop's ears](#the-laptops-ears-wake-word)) |
 | "Remember that the spare key is in the kitchen drawer" | Saved to memory (`save_memory`) |
 | "Where's the spare key?" | Answered from memory: related memories are put in her prompt automatically |
 | "What did I tell you about my car?" | Searches memories and past conversations (`recall_memory`) |
@@ -26,7 +27,8 @@ S3 --(Wi-Fi, HTTP)--> friday-local --> faster-whisper   (hearing, on the laptop)
 | "What's the gold price today?" / "Any news on..." | Live web search (`web_search`): Google and DuckDuckGo are asked at once, the first good answer wins |
 | "How's the weather in Gandhinagar?" / "Will it rain tomorrow?" | Open-Meteo forecast (`get_weather`), free and usually under a second. No city = your profile's city |
 | "Play Kesariya" / "Play some Arijit Singh" / "Play the Brahmastra songs" | Plays from your own songs (`play_music`), then keeps going with others |
-| "Pause" / "Resume" / "Next song" / "Go back" / "Stop" / "Louder" / "Volume 40" | `music_control` |
+| "Pause" / "Resume" / "Next song" / "Go back" / "Stop" / "Louder" / "Volume 40" | Answered on the laptop in milliseconds, no Gemini ([commands without Gemini](#commands-without-gemini)); other wordings go to Gemini's `music_control` |
+| "What's playing?" / "What time is it?" / "What's the date?" | Also answered on the laptop |
 | "Play Tum Hi Ho next" | Queues it after the current song |
 | "I added some songs" | Indexes new files in the music folder (`check_new_music`) |
 | "What do my biology notes say about mitochondria?" / "How do I reset the router, it's in the manual" | Answers from the documents you uploaded to Cortex and says which one, and which page, it came from |
@@ -114,6 +116,91 @@ friday> Got it, boss. The spare key is in the kitchen drawer.
 
 To test from the laptop as if you were the S3: `python client.py --say "hello"` (or
 `--ask question.wav`). It finds the server the same way the S3 does.
+
+## The laptop's ears (wake word)
+
+Until the speaker has a good microphone, the **laptop's own mic** listens. Say **"Hey Jarvis"**, then your
+question in the same breath or after the chime; when you stop talking, the speaker answers. Only that phrase
+wakes her: other speech, music and noise score close to zero.
+
+```
+laptop mic ─80 ms─▶ wake word ──"hey jarvis"──▶ record until you stop ──▶ Whisper ─▶ local command or Gemini ─▶ speaker
+              openWakeWord, always on            Silero speech detector
+```
+
+Nothing is recorded or sent anywhere before the wake word: each 80 ms of sound is scored and thrown away.
+The speaker never gets pushed to: it asks with `GET /listen` and the laptop holds that request until the wake
+word is heard (firmware `LAPTOP_MIC 1`). On a wake the speaker chimes and silences the music, so the mic hears
+you and not the song.
+
+**She doesn't wake herself up.** While she's answering (and until the speaker has finished playing the reply)
+the wake word is switched off, then stays off another `WAKE_COOLDOWN_S` for the echo. You can't interrupt her
+by voice yet; BOOT works.
+
+**Setup:** `pip install -r requirements.txt` (adds `sounddevice` and `openwakeword`). The first start downloads
+the wake word model from openWakeWord's GitHub (about 5 MB). You'll see
+`[ears] listening for "hey jarvis" on Microphone (Realtek...)`.
+
+**Check it without the speaker:**
+
+```
+python -m ears.mic                  which microphones there are, and a 5 s level meter (talk!)
+python client.py --listen           be the speaker: say "hey jarvis, what's the time" and it prints the answer
+```
+
+| Setting | Default | Does |
+|---|---|---|
+| `EARS` | `1` | `0` = no laptop mic (BOOT push-to-talk on the S3 only) |
+| `MIC_DEVICE` | blank | The Windows default mic, or a number / part of a name from `python -m ears.mic` |
+| `WAKE_MODEL` | `hey_jarvis` | A built-in phrase (`hey_jarvis`, `alexa`, `hey_mycroft`) or your own model's path, e.g. `models/hey_friday.onnx` |
+| `WAKE_THRESHOLD` | `0.6` | 0..1. Raise it if she wakes up when nobody called her, lower it if she misses you |
+| `WAKE_DEBUG` | `0` | `1` prints each near-miss (`[ears] near miss: 0.43`), which is how you pick a threshold for your room |
+| `WAKE_COOLDOWN_S` | `0.8` | Deaf this long after the speaker has finished a reply |
+| `EARS_START_S` / `EARS_SILENCE_MS` / `EARS_MAX_S` | `5` / `800` / `12` | After the wake word: how long you have to start, how much silence ends the question, the longest question |
+
+**Your own "Hey Friday".** "Hey Jarvis" is built in so everything works today. A custom phrase is a small
+model trained on synthetic speech (an hour or two, e.g. with [livekit-wakeword](https://pypi.org/project/livekit-wakeword/),
+which exports openWakeWord-compatible ONNX). Put the `.onnx` in `server/models/` and set
+`WAKE_MODEL=models/hey_friday.onnx`; nothing else changes. Use two words ("hey friday"), not "friday" alone:
+a single word false-triggers in normal conversation ("it's Friday").
+
+When the INMP441 arrives, the same job moves onto the S3 (ESP-SR WakeNet); the rest of this pipeline stays.
+
+## Commands without Gemini
+
+Plain commands are answered **on the laptop** (`intents.py`): no tokens, no Gemini round trip, the reply starts
+as soon as Whisper is done. Short replies like "Paused." and "Volume 40 percent." are already cached as audio,
+so they play instantly.
+
+| Command | Examples |
+|---|---|
+| Pause / resume / stop | "pause", "pause the music", "resume", "carry on", "stop" |
+| Skip / back / restart | "next song", "skip this one", "go back", "play it again", "from the top" |
+| Volume | "louder", "a bit quieter", "volume 40", "set the volume to forty five", "full volume" |
+| Play | "play Kesariya", "play something by Arijit", "play Tum Hi Ho next", "play some music" |
+| What's on | "what's playing?", "who sings this?" |
+| Time and date | "what time is it?", "what's the date today?" |
+
+Exact phrases are matched first. Other wordings ("hold the music a sec", "make it a bit softer") go through
+a small sentence model (all-MiniLM-L6-v2 on onnxruntime, ~90 MB, downloaded once into the Hugging Face cache;
+nothing new to install). It only takes a sentence it's sure of: no negations ("don't stop"), no questions
+except "what's playing" and the time, at most `INTENT_MAX_WORDS` words, and a clear lead over the next-best
+command. A song the library can't find goes to Gemini, which can work out what you meant.
+
+```
+python intents.py "turn it down a bit"      what Friday would do, and the model's score for each command
+```
+
+These turns aren't saved to her conversation history or memory (there's nothing to remember in "pause"), and
+the console shows them as `local pause (phrase) 0 ms, no Gemini`.
+
+| Setting | Default | Does |
+|---|---|---|
+| `LOCAL_COMMANDS` | `1` | `0` = everything goes to Gemini, as before |
+| `INTENT_MODEL` | `1` | `0` = exact phrases only (no download) |
+| `INTENT_MIN_SIMILARITY` | `0.8` | How sure the model must be. Raise it if a sentence is taken for a command it isn't |
+| `INTENT_MARGIN` | `0.05` | How far the best command must be ahead of the next one |
+| `INTENT_MAX_WORDS` | `8` | Longer sentences always go to Gemini |
 
 ## Looking at and editing memory
 
@@ -384,7 +471,8 @@ is renamed to `latency.<date>.log` and a new one is started.)
 
 ## Privacy
 
-Recordings, transcripts and memories stay on this laptop; your uploaded documents live in your own Supabase
+With `EARS=1` the laptop's mic is always on, but only to score each 80 ms for the wake word, on the laptop;
+nothing is kept or sent until the wake word is heard. Recordings, transcripts and memories stay on this laptop; your uploaded documents live in your own Supabase
 project (see [Your documents](#your-documents-cortex)). What leaves the laptop: the text of each question (plus the
 profile, relevant memories and any matching document passages) goes to Gemini, each memory is sent once to Gemini's
 embedding API to index it, and while you have documents uploaded almost every question of three or more words is
@@ -395,6 +483,14 @@ documents). Passwords, PINs and card numbers are refused.
 
 | Problem | Fix |
 |---|---|
+| `[ears] off: openwakeword isn't installed` (or `sounddevice`) | `pip install -r requirements.txt` in the server's venv |
+| `[ears] off: no microphone found` / `the mic has gone quiet` | Windows Settings → Privacy → Microphone: allow desktop apps. Check with `python -m ears.mic` |
+| `[ears] heard "hey jarvis" ..., but the speaker isn't connected` | The S3's firmware needs `LAPTOP_MIC 1`, or test with `python client.py --listen` |
+| She wakes up when nobody called her | Raise `WAKE_THRESHOLD` (0.7); keep the laptop away from the TV |
+| She doesn't hear "hey jarvis" | `WAKE_DEBUG=1` shows how close you got; lower `WAKE_THRESHOLD` a little, or speak towards the laptop |
+| She cuts you off mid-sentence | Raise `EARS_SILENCE_MS` (1200) |
+| A command went to Gemini | `python intents.py "what you said"` shows why. Add the wording to `EXAMPLES` in `intents.py`, or lower `INTENT_MIN_SIMILARITY` a little |
+| `[local] command model off (...)` | No internet for the first download, or Hugging Face blocked: exact phrases still work |
 | `can't connect to PostgreSQL ... password authentication failed` | Wrong password in `DATABASE_URL`: use the one Adminer accepts |
 | `can't connect to PostgreSQL ... Connection refused` | Docker Desktop isn't running, or the container is stopped: `cd db` then `docker compose start` |
 | `GEMINI_API_KEY is not set` | `.env` missing or in the wrong folder (it must sit next to `server.py`) |

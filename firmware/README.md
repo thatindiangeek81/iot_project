@@ -13,6 +13,22 @@ The S3 finds the laptop by itself (UDP broadcast). If the laptop is off, questio
 **Cloudflare Worker** as before (no memory, no music). If no voice is available at all, the
 S3 speaks the reply itself with **SAM**.
 
+## The laptop's mic as Friday's ears (`LAPTOP_MIC 1`)
+
+While the S3's own mic is the noisy MAX4466, the **laptop listens** instead: say **"Hey Jarvis"** near it and
+ask. The S3 waits for it with `GET /listen` (a long poll, on a connection of its own), and on a wake it
+**chimes**, silences the music so the laptop hears you and not the song, and plays the answer like any other
+reply. BOOT becomes **"listen now"** (press, don't hold); if the laptop can't be reached, BOOT falls back to
+push-to-talk on the S3's mic. Typing still works. Needs friday-local with `EARS=1` (see its README).
+
+| Setting (`config.h`) | Does |
+|---|---|
+| `LAPTOP_MIC` | `1` = the laptop's mic + wake word, `0` = push-to-talk on the S3 only (as before) |
+| `LISTEN_HOLD_SEC` | How long the laptop holds each poll: same as `LISTEN_HOLD_S` in its `.env` |
+
+The S3 asks for the wake word only while no turn is running, and the laptop takes each new poll to mean "the
+speaker has finished talking": that is how Friday never wakes herself up with her own voice.
+
 ## What changed from Phase 5
 
 | File | Change |
@@ -70,6 +86,9 @@ friday> Got it, boss. The spare key is in the kitchen drawer.
 | 4 | Stop friday-local (Ctrl+C), ask anything | `[brain] laptop is not answering...`, `[brain] using the cloud Worker`, and `[time] cloud` |
 | 5 | Start friday-local again, wait 15 s | `[brain] found the laptop at ...`; next question says `[time] laptop` |
 | 6 | Hold BOOT and say nothing for 2 s | `[heard] nothing clear`, she says she didn't catch that |
+| 6a | `LAPTOP_MIC 1`: near the laptop, "Hey Jarvis, what time is it?" | Chime, `[listening] on the laptop's mic...`, she tells the time (the laptop prints `local time`, no Gemini) |
+| 6b | "Hey Jarvis" ... say nothing | `[heard] nothing after the wake word` after about 5 s, no reply |
+| 6c | Play a song, then "Hey Jarvis, pause" | The music goes silent while you speak, then pauses: `local pause (phrase)` on the laptop |
 | 7 | Type a question at `you>` | Answered by the laptop the same way |
 | 8 | Mobile data off on the hotspot (laptop still on Wi-Fi) | Hearing, memory and voice still work locally; only Gemini fails, and SAM speaks the error |
 | 9 | "Play" + a song you have | `[action] {"music":"play",...}`, then `[music] playing <title>`; the song starts quietly under her reply, then comes up |
@@ -101,6 +120,9 @@ friday> Got it, boss. The spare key is in the kitchen drawer.
 | Music too loud / quiet next to her voice | `MUSIC_GAIN` in `config.h` (0.6 default) |
 | Music too loud while you talk | Lower `MUSIC_DUCK_LEVEL`, or `MUSIC_ON_TALK MUSIC_PAUSE` |
 | `E BOD: Brownout detector was triggered` or a `TG1WDT` reset when a song starts | The amp pulls more current than the supply gives (loud bass at high volume). Power the board from a 5 V / 2 A adapter or a powered hub rather than a laptop port, and put a 470–1000 µF capacitor across the amp's VIN/GND. `MUSIC_HIGHPASS_HZ` (120) already cuts the deepest bass; lowering `MUSIC_GAIN` or the volume also helps |
+| `[ears] the laptop answered /listen with HTTP 503` | friday-local's mic is off: `EARS=1` in its `.env`, and look for `[ears] off: ...` in its window |
+| `[ears] the laptop answered /listen with HTTP 404` | friday-local is older than this firmware: update it |
+| "Hey Jarvis" does nothing | The laptop's window shows `[ears] heard "hey jarvis"` when it hears you; if it doesn't, see the ears section of its README |
 | `[brain] the laptop took more than 45 s` | Something on the laptop was very slow (usually a web search): its window shows which step |
 | Music stutters | `MUSIC_PREBUFFER_MS` up to 1500; check the laptop isn't busy converting (first play of a song converts it, later plays are instant) |
 
@@ -108,8 +130,8 @@ friday> Got it, boss. The spare key is in the kitchen drawer.
 
 | File | What it does |
 |---|---|
-| `main/main.c` | The main loop records while BOOT is held; one **assistant task** (32 KB stack) runs every turn, spoken or typed, one at a time |
-| `main/cloud.c/.h` | HTTP(S) client for the laptop or the Worker (same protocol). `cloud_ask()` uploads a recording, `cloud_say()` a typed question; both parse the reply frame as it arrives and hand audio to the speaker |
+| `main/main.c` | The main loop records while BOOT is held (with `LAPTOP_MIC`: asks the laptop to listen); one **assistant task** (32 KB stack) runs typed and push-to-talk turns, the **ears task** (32 KB) the laptop-mic turns; one turn at a time |
+| `main/cloud.c/.h` | HTTP(S) client for the laptop or the Worker (same protocol). `cloud_ask()` uploads a recording, `cloud_say()` a typed question, `cloud_listen_answer()` fetches what the laptop's mic heard; all parse the reply frame as it arrives and hand audio to the speaker. `cloud_listen_wait()` is the wake-word long poll, `cloud_listen_press()` the BOOT button |
 | `main/net.c/.h` | Wi-Fi, laptop discovery, the quick reachability check |
 | `main/textin.c/.h` | Reads typed lines from the serial monitor without blocking push-to-talk |
 | `main/player.c/.h` | The mixer: voice, music and chimes into the speaker at 16 kHz. Voice prebuffers and refills on stalls; music ducks under it; master volume |
