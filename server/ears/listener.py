@@ -243,7 +243,8 @@ class Ears:
     @contextmanager
     def busy(self):
         """Around every turn (/ask, /say, /chat, /listen): she may talk, so the wake word is off. Idle polls
-        waiting now are answered at once, so the speaker polls again only after the turn."""
+        waiting when it starts or ends are answered at once: the speaker polls again once it has finished
+        playing the reply, and that poll turns the wake word back on."""
         with self.cv:
             if self.state == LISTENING:          # a typed or push-to-talk question beat the wake word
                 self._end(None)
@@ -256,6 +257,7 @@ class Ears:
         finally:
             with self.cv:
                 self.turns -= 1
+                self.release += 1                # a poll that arrived during the turn mustn't keep her deaf
                 self.cv.notify_all()
 
     def status(self) -> dict:

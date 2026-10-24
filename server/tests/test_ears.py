@@ -222,6 +222,19 @@ class NeverHerOwnVoice(Base):
             t.join(2)
         self.assertEqual(got, [None])
 
+    def test_a_poll_that_arrives_during_a_turn_is_answered_when_it_ends(self):
+        got = []
+        with self.ears.busy():
+            t = threading.Thread(target=lambda: got.append(self.ears.wait_for_wake(5)))
+            t.start()
+            self.assertTrue(_until(lambda: self.ears.polling == 1))
+            self.assertEqual(got, [])
+        t.join(2)
+        self.assertEqual(got, [None])
+        self.assertTrue(self.ears.muted)                               # still deaf: the reply may be playing
+        self.poll()                                                    # the next poll is the speaker being done
+        self.assertFalse(self.ears.muted)
+
     def test_a_typed_question_beats_a_wake_word_not_yet_picked_up(self):
         self.poll()
         self.frames(1, wake=0.9)
