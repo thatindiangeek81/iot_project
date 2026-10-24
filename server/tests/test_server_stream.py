@@ -66,6 +66,8 @@ class FakeTTS:
 class FakeAssistant:
     think_stream = server.Assistant.think_stream
     stream_enabled = server.Assistant.stream_enabled
+    local = server.Assistant.local
+    router = None                                 # no local commands unless a test sets one
 
     def __init__(self, voice):
         self.turn_lock = threading.Lock()

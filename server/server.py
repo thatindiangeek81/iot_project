@@ -6,6 +6,10 @@ It speaks exactly the same HTTP protocol as the Cloudflare Worker (/ask, /say,
 broadcast and falls back to the Worker when the laptop is off. Music is laptop
 only: GET /music/<id> and /music/next stream songs from your library.
 
+The laptop can also be Friday's ears (ears/): it listens for the wake word on its
+own mic, and the S3 collects what was said with GET /listen. Simple commands
+("pause", "volume 40", "play Kesariya") are answered here without Gemini (intents.py).
+
     python server.py                       run it
     python server.py --test "hi there"     check Gemini, memory and the voice, no hardware
     python server.py --test-wav q.wav      the whole pipeline on a recording
@@ -22,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
@@ -79,6 +84,11 @@ class Assistant:
             self.jukebox = Jukebox(self.memory)
         except Exception as exc:              # music is optional: never stop Friday starting
             print(f"[music] off: {type(exc).__name__}: {exc}")
+        self.router = None
+        if config.LOCAL_COMMANDS:
+            from intents import Router
+
+            self.router = Router(load_model=config.INTENT_MODEL)   # the model loads in the background
         self.stt = None
         if with_stt:
             from stt import STT
@@ -106,6 +116,26 @@ class Assistant:
             return self.brain.answer(heard, jb)
         except gemini.GeminiError as exc:
             raise TurnError(str(exc), exc.status, heard=heard) from None
+
+    def local(self, heard: str, music_state: str | None = None) -> dict | None:
+        """A command answered on the laptop without Gemini ("pause", "volume 40"), as a turn result; None = ask
+        Gemini. Never raises: a broken local command must not stop the question from being answered."""
+        router = getattr(self, "router", None)
+        if router is None or not heard:
+            return None
+        t0 = time.time()
+        try:
+            jb = self.jukebox if self.jukebox and self.jukebox.observe(music_state) else None
+            hit = router.route(heard, jb)
+        except Exception as exc:
+            print(f"[local] {type(exc).__name__}: {exc}; asking Gemini instead")
+            return None
+        if hit is None:
+            return None
+        ms = int((time.time() - t0) * 1000)
+        return {"reply": hit.reply, "ms": ms, "actions": hit.action, "citations": [], "local": hit,
+                "tools": [{"tool": f"local:{hit.intent}", "args": {}, "ms": ms, "result": json.dumps(hit.result)[:300]}],
+                "timing": {"prompt_ms": 0, "gemini_ms": [], "tool_ms": ms, "fast": True, "local": True}}
 
     def stream_enabled(self) -> bool:
         return config.STREAM_REPLIES and self.stream_fails < config.STREAM_MAX_FAILS
@@ -204,6 +234,7 @@ class Handler(BaseHTTPRequestHandler):
     disable_nagle_algorithm = True         # TCP_NODELAY: a small write (the header, the end of a sentence) goes out
                                            # now, not after the S3 has got round to acknowledging the one before
     assistant: Assistant = None            # set in main()
+    ears = None                            # ears.Ears when the laptop's mic is on (set in main())
 
     def log_message(self, fmt, *args) -> None:   # quiet; turns print their own summary
         pass
@@ -259,15 +290,67 @@ class Handler(BaseHTTPRequestHandler):
                 return self._music(url)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 return                         # the speaker skipped or paused: normal
+        if url.path == "/listen":
+            if not self._token_ok():
+                return self._json({"error": "bad or missing X-Device-Token"}, 401)
+            try:
+                return self._listen(url)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                return                         # the speaker went away while waiting: it polls again
         if url.path != "/health":
             return self._json({"error": "not found"}, 404)
         a = self.assistant
         jb = a.jukebox
+        router = getattr(a, "router", None)
         self._json({"ok": True, "server": "friday-local", "model": config.GEMINI_MODEL,
                     "voice": a.tts.name, "stt": config.WHISPER_MODEL if a.stt else None,
                     "facts": a.memory.count_facts(), "web_search": config.WEB_SEARCH, "stream": a.stream_enabled(),
                     "documents": _documents_health(),
-                    "music": {"songs": jb.count(), "ffmpeg": bool(jb.ffmpeg)} if jb else None})
+                    "music": {"songs": jb.count(), "ffmpeg": bool(jb.ffmpeg)} if jb else None,
+                    "ears": self.ears.status() if self.ears else "off",
+                    "local_commands": ("phrases + model" if router.embedder else "phrases") if router else "off"})
+
+    # ------------------------------------------------------------ the laptop's ears
+
+    def _token_ok(self) -> bool:
+        return bool(config.DEVICE_TOKEN) and self.headers.get("X-Device-Token", "") == config.DEVICE_TOKEN
+
+    def _busy(self):
+        """Around every turn: the laptop's ears ignore the wake word while Friday may be talking."""
+        return self.ears.busy() if self.ears else nullcontext()
+
+    def _listen(self, url) -> None:
+        """GET /listen: the speaker waiting for the laptop's ears.
+
+        /listen          idle poll: held up to LISTEN_HOLD_S. 202 {"event": "wake", "id": n} as soon as the wake
+                         word is heard (or BOOT asked for it), 204 when nothing happened (poll again).
+        /listen?wake=n   the speaker has chimed and turned the music down: held until you stop talking, then
+                         answered exactly like /ask (200 + reply frame). 202 {"event": "cancel"} if nothing was said.
+        """
+        ears = self.ears
+        if ears is None:
+            return self._json({"error": "the laptop's mic is off (EARS=0 in .env, or it failed at start-up: "
+                                        "see the server window)"}, 503)
+        wake = (parse_qs(url.query).get("wake") or [""])[0]
+        if not wake:
+            wake_id = ears.wait_for_wake(config.LISTEN_HOLD_S)
+            if wake_id is None:
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            return self._json({"event": "wake", "id": wake_id, "source": ears.source}, 202)
+        try:
+            wake_id = int(wake)
+        except ValueError:
+            return self._json({"error": "wake must be a number"}, 400)
+        pcm = ears.wait_for_question(wake_id, config.EARS_START_S + config.EARS_MAX_S + 3)
+        if pcm is None:
+            return self._json({"event": "cancel"}, 202)
+        self.t_start = time.time()             # the question is complete: the speaker is now waiting
+        self.music_state = self.headers.get("X-Music-State")
+        with ears.busy(), self.assistant.turn_lock:
+            self._turn(lambda: self._answer_audio(pcm, debug=False))
 
     # ------------------------------------------------------------ music
 
@@ -403,38 +486,49 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         self.t_start = time.time()             # the question is in: the speaker is now waiting
 
-        if url.path not in ("/ask", "/say", "/chat"):
+        if url.path not in ("/ask", "/say", "/chat", "/listen/wake"):
             return self._json({"error": "not found"}, 404)
-        token = self.headers.get("X-Device-Token", "")
-        if not config.DEVICE_TOKEN or token != config.DEVICE_TOKEN:
+        if not self._token_ok():
             return self._json({"error": "bad or missing X-Device-Token"}, 401)
+        if url.path == "/listen/wake":         # BOOT on the speaker, with the laptop as its ears
+            if self.ears is None:
+                return self._json({"error": "the laptop's mic is off"}, 503)
+            if self.ears.wake_now():
+                return self._json({"ok": True}, 202)
+            return self._json({"error": "busy: Friday is answering"}, 409)
 
         self.music_state = self.headers.get("X-Music-State")   # sent by speakers that can play music
-        with self.assistant.turn_lock:
+        with self._busy(), self.assistant.turn_lock:
+            self._turn(lambda: self._post_turn(url, body))
+
+    def _post_turn(self, url, body: bytes) -> None:
+        if url.path == "/ask":
+            return self._ask(body, parse_qs(url.query).get("debug") == ["1"])
+        try:
+            text = str(json.loads(body or b"{}").get("text", "")).strip()
+        except ValueError:
+            raise TurnError('body must be JSON like {"text": "..."}', 400) from None
+        if not text:
+            raise TurnError("text is empty", 400)
+        if len(text) > config.MAX_INPUT_CHARS:
+            raise TurnError(f"text longer than {config.MAX_INPUT_CHARS} characters", 400)
+        (self._chat if url.path == "/chat" else self._say)(text)
+
+    def _turn(self, run) -> None:
+        """Run one turn, turning its failures into replies the speaker can print."""
+        try:
+            run()
+        except TurnError as exc:
+            print(f"[turn] failed: {exc}")
+            self._json({"error": str(exc), **exc.extra}, exc.status)
+        except (BrokenPipeError, ConnectionResetError):
+            print("[turn] the speaker hung up mid-reply")
+        except Exception as exc:
+            print(f"[turn] crashed: {type(exc).__name__}: {exc}")
             try:
-                if url.path == "/ask":
-                    self._ask(body, parse_qs(url.query).get("debug") == ["1"])
-                else:
-                    try:
-                        text = str(json.loads(body or b"{}").get("text", "")).strip()
-                    except ValueError:
-                        raise TurnError('body must be JSON like {"text": "..."}', 400) from None
-                    if not text:
-                        raise TurnError("text is empty", 400)
-                    if len(text) > config.MAX_INPUT_CHARS:
-                        raise TurnError(f"text longer than {config.MAX_INPUT_CHARS} characters", 400)
-                    (self._chat if url.path == "/chat" else self._say)(text)
-            except TurnError as exc:
-                print(f"[turn] failed: {exc}")
-                self._json({"error": str(exc), **exc.extra}, exc.status)
-            except (BrokenPipeError, ConnectionResetError):
-                print("[turn] the speaker hung up mid-reply")
-            except Exception as exc:
-                print(f"[turn] crashed: {type(exc).__name__}: {exc}")
-                try:
-                    self._json({"error": f"server error: {exc}"}, 500)
-                except OSError:
-                    pass
+                self._json({"error": f"server error: {exc}"}, 500)
+            except OSError:
+                pass
 
     def _first_voice(self, reply: str, **extra) -> tuple:
         try:
@@ -550,7 +644,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.assistant.after_turn(heard, result)
 
+    def _local_turn(self, heard: str, stt_ms: int, typed: bool, result: dict) -> None:
+        """Speak a command the laptop answered by itself: no Gemini, no memory (it's only "pause")."""
+        backend, first, rest, tts_ms = self._first_voice(result["reply"], action=result.get("actions") or {},
+                                                         **({} if typed else {"heard": heard}))
+        header = self._header(None if typed else heard, result, backend, tts_ms, stt_ms)
+        audio = self._stream(header, first, rest, backend)
+        result["timing"]["first_audio_ms"] = self.first_audio_ms
+        _latency("local", heard, stt_ms, result, tts_ms, self.first_audio_ms)
+        hit = result["local"]
+        print(f"[turn] {'typed' if typed else 'heard'} \"{heard}\" | {'' if typed else f'Whisper {stt_ms} ms | '}"
+              f"local {hit.intent} ({hit.how}) {result['ms']} ms, no Gemini | {backend.name} {tts_ms} ms\n"
+              f"friday> {result['reply']}{_action(result)}")
+        _save_reply(audio, backend.fmt)
+
     def _chat(self, text: str) -> None:
+        local = self.assistant.local(text, self.music_state)
+        if local:
+            self._json({"reply": local["reply"], "ms": local["ms"], "tools": [t["tool"] for t in local["tools"]],
+                        "action": local["actions"], "citations": []})
+            print(f"[turn] typed \"{text}\" -> {local['reply']} (local {local['local'].intent}, no Gemini)")
+            return
         result = self.assistant.think(text, self.music_state)
         self._json({"reply": result["reply"], "ms": result["ms"], "tools": [t["tool"] for t in result["tools"]],
                     "action": result.get("actions") or {}, "citations": result.get("citations") or []})
@@ -558,6 +672,9 @@ class Handler(BaseHTTPRequestHandler):
         self._after(text, result)
 
     def _say(self, text: str) -> None:
+        local = self.assistant.local(text, self.music_state)
+        if local:
+            return self._local_turn(text, 0, True, local)
         fell_back = False
         if self._wants_stream():
             if self._turn_streamed(text, 0, typed=True):
@@ -577,10 +694,17 @@ class Handler(BaseHTTPRequestHandler):
         self._after(text, result)
 
     def _ask(self, body: bytes, debug: bool) -> None:
+        self._answer_audio(read_audio(body), debug)
+
+    def _answer_audio(self, pcm: np.ndarray, debug: bool) -> None:
+        """A spoken question, recorded by the speaker (/ask) or by the laptop's own mic (/listen)."""
         a = self.assistant
-        pcm = read_audio(body)
         _save("last_question.wav", pcm)
         heard, raw, stt_ms = a.hear(pcm)
+
+        local = None if debug else a.local(heard, self.music_state)
+        if local:
+            return self._local_turn(heard, stt_ms, False, local)
 
         fell_back = False
         if heard and not debug and self._wants_stream():
@@ -626,7 +750,10 @@ def _latency(kind: str, said: str, stt_ms: int, result: dict, tts_ms: int, first
     rounds = t.get("gemini_ms") or []
     gemini = "+".join(map(str, rounds)) or "0"
     s = stream or {}
-    if stream is None:
+    if t.get("local"):
+        line = (f"[latency] {first_audio_ms} ms to first audio = hearing {stt_ms} + local command "
+                f"{t.get('tool_ms', 0)} (no Gemini) + voice {tts_ms}")
+    elif stream is None:
         line = (f"[latency] {first_audio_ms} ms to first audio = hearing {stt_ms} + memory/prompt "
                 f"{t.get('prompt_ms', 0)} + Gemini {gemini}"
                 f"{' (quick reply)' if t.get('fast') else ''} + tools {t.get('tool_ms', 0)} + voice {tts_ms}")
@@ -852,6 +979,22 @@ def run_test(a: Assistant, text: str | None, wav: str | None, music_state: str |
     a.background.idle(60)
 
 
+def start_ears():
+    """The laptop's mic + wake word, or None (EARS=0, or something is missing: Friday works without it)."""
+    if not config.EARS:
+        return None
+    try:
+        from ears import Ears
+
+        ears = Ears()
+        ears.start()
+    except Exception as exc:
+        print(f"[ears] off: {exc}")
+        return None
+    print(f"[ears] listening for \"{ears.phrase}\" on {ears.mic_name} (threshold {config.WAKE_THRESHOLD})")
+    return ears
+
+
 def _documents_health():
     """For /health: "off", "connecting", "unreachable", or how many documents are ready (RAM only)."""
     import cortex
@@ -890,6 +1033,7 @@ def main() -> None:
         return
 
     Handler.assistant = assistant
+    Handler.ears = start_ears()
     import gemini
 
     gemini.keepalive_start()
