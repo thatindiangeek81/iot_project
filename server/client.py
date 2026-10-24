@@ -29,6 +29,9 @@ import frames
 def find_server(timeout: float = 3.0) -> tuple[str, int] | None:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    if hasattr(socket, "SIO_UDP_CONNRESET"):
+        # Windows: a probe that finds nothing listening would make the next recvfrom fail with WinError 10054
+        s.ioctl(socket.SIO_UDP_CONNRESET, False)
     s.settimeout(0.5)
     end = time.time() + timeout
     targets = ["255.255.255.255", "127.0.0.1"]
@@ -40,8 +43,8 @@ def find_server(timeout: float = 3.0) -> tuple[str, int] | None:
                 pass
         try:
             data, addr = s.recvfrom(64)
-        except socket.timeout:
-            continue
+        except (socket.timeout, ConnectionResetError):
+            continue                                       # nobody answered yet: ask again
         if data.startswith(b"I2SONIC!"):
             port = int(data[8:] or config.HTTP_PORT)
             return addr[0], port
