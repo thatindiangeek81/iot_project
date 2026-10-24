@@ -72,3 +72,21 @@ esp_err_t cloud_say(const char *text, const cloud_say_cb_t *cb,
 // then on_text and on_audio work exactly as for cloud_say().
 esp_err_t cloud_ask(const int16_t *pcm, size_t samples, const cloud_say_cb_t *cb,
                     char *err, size_t err_len, cloud_result_t *res);
+
+// ---------------------------------------------------------------- the laptop's mic (LAPTOP_MIC 1)
+//
+// The laptop listens for the wake word on its own mic; the speaker asks it, with GET /listen, what it heard.
+
+// Wait up to hold_s for the wake word, on a connection of its own (safe beside a turn in another task).
+// Returns its wake id (> 0), 0 if nothing happened (ask again), -1 if the laptop can't be asked (wait a bit).
+int cloud_listen_wait(int hold_s);
+
+// After a wake: the laptop records until you stop talking, then answers exactly like cloud_ask (on_heard,
+// on_text, on_audio, on_action). ESP_ERR_NOT_FOUND = nothing was said. Call it only while you own the turn,
+// like cloud_say and cloud_ask: the three share one connection.
+esp_err_t cloud_listen_answer(int wake_id, const cloud_say_cb_t *cb,
+                              char *err, size_t err_len, cloud_result_t *res);
+
+// BOOT pressed: ask the laptop to listen now, as if it had heard the wake word.
+// Returns the HTTP status: 202 listening, 409 busy answering, 0 laptop not reachable.
+int cloud_listen_press(void);

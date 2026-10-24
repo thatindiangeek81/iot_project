@@ -23,6 +23,14 @@
 #define LAPTOP_PROBE_MS      700    // "is it still there?" check before each question
 #define USE_WORKER_FALLBACK  1      // 1 = use the Worker when the laptop can't be reached
 
+// ---------- The laptop's mic (wake word) ----------
+// 1 = the laptop listens on its own mic for the wake word ("hey jarvis", or your own "hey friday") and
+//     sends the answer here; BOOT then means "listen now" (no holding), and falls back to push-to-talk on
+//     the S3's mic when the laptop can't be reached. Needs friday-local with EARS=1 in its .env.
+// 0 = push-to-talk on the S3's own mic only, as before.
+#define LAPTOP_MIC           1
+#define LISTEN_HOLD_SEC      20     // LISTEN_HOLD_S in friday-local's .env
+
 // ---------- Microphone ----------
 #define MIC_MAX4466   1          // analog module -> ADC
 #define MIC_INMP441   2          // digital I2S mic
@@ -42,7 +50,7 @@
 #define AMP_SD_GPIO        18    // driven low between replies, so no idle hiss
 
 // ---------- Button ----------
-#define PTT_GPIO            0    // BOOT button: hold to talk
+#define PTT_GPIO            0    // BOOT button: hold to talk (with LAPTOP_MIC: press to make the laptop listen)
 
 // ---------- Audio ----------
 #define SAMPLE_RATE_HZ   16000   // what Whisper and ESP-SR both expect
