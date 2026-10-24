@@ -635,25 +635,12 @@ class Brain:
         play / pause / skip / volume command. "" = let Gemini answer as usual."""
         if not config.FAST_MUSIC_REPLIES or not calls or len(self._music_results) != len(calls):
             return ""
+        from jukebox import spoken
+
         parts = []
         for name, args, r in self._music_results:
-            if not isinstance(r, dict) or "error" in r:
+            line = spoken(r)
+            if not line:
                 return ""
-            if "playing" in r:
-                if r.get("note") == "from the start":
-                    parts.append("From the top.")
-                else:
-                    parts.append(f"Here's {r['playing']}.")
-            elif "queued" in r:
-                what = "those" if "songs (" in str(r["queued"]) else str(r["queued"])
-                parts.append(f"Okay, {what} up next." if r.get("position") == "next"
-                             else f"Added {what} to the queue.")
-            elif "done" in r:
-                done = str(r["done"])
-                parts.append({"paused": "Paused.", "resumed": "Back on.", "stopped": "Stopped.",
-                              "already playing": "It's already playing.",
-                              "nothing was playing": "Nothing was playing."}.get(
-                    done, done[0].upper() + done[1:] + "."))
-            else:
-                return ""
+            parts.append(line)
         return " ".join(parts)

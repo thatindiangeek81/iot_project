@@ -51,6 +51,24 @@ def _similar(query: str, field: str) -> float:
     return max(min(chars, words), overlap * 0.9)
 
 
+def spoken(result) -> str:
+    """What Friday says after a successful play / pause / skip / volume result ("Here's Kesariya.", "Paused."),
+    or "" when it needs Gemini to word it (an error, or anything else)."""
+    if not isinstance(result, dict) or "error" in result:
+        return ""
+    if "playing" in result:
+        return "From the top." if result.get("note") == "from the start" else f"Here's {result['playing']}."
+    if "queued" in result:
+        what = "those" if "songs (" in str(result["queued"]) else str(result["queued"])
+        return f"Okay, {what} up next." if result.get("position") == "next" else f"Added {what} to the queue."
+    if "done" in result:
+        done = str(result["done"])
+        return {"paused": "Paused.", "resumed": "Back on.", "stopped": "Stopped.",
+                "already playing": "It's already playing.",
+                "nothing was playing": "Nothing was playing."}.get(done, done[0].upper() + done[1:] + ".")
+    return ""
+
+
 def _fmt_time(seconds: float | None) -> str:
     if seconds is None:
         return "?"
