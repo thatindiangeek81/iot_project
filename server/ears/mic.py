@@ -101,7 +101,12 @@ def _main() -> None:
 
     sd = _sd()
     print("Microphones (use the number or part of the name as MIC_DEVICE in .env):")
-    default_in = sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else sd.default.device
+    try:
+        default_in = sd.default.device[0]            # (input, output); -1 = none set: ask PortAudio
+        if default_in is None or default_in < 0:
+            default_in = sd.query_devices(kind="input")["index"]
+    except Exception:
+        default_in = None
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0:
             print(f"  {i:3d}  {d['name']}{'   <- default' if i == default_in else ''}")
