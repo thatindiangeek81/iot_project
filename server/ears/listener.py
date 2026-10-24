@@ -73,7 +73,7 @@ class Ears:
         if self.mic is None:
             from .mic import Mic
 
-            self.mic = Mic(config.MIC_DEVICE)
+            self.mic = Mic(config.MIC_DEVICE, config.MIC_GAIN_DB)
         self.phrase = getattr(self.wake, "phrase", "")
         self.mic_name = getattr(self.mic, "name", "")
         self.mic.start()

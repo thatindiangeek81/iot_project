@@ -110,6 +110,7 @@ WHISPER_HINT = _get("WHISPER_HINT", "A person talking to a voice assistant named
 # records until you stop talking and sends the answer to the speaker (which asks for it with GET /listen).
 EARS = _get_bool("EARS", True)                       # 0 = no laptop mic (push-to-talk on the S3 only)
 MIC_DEVICE = _get("MIC_DEVICE", "")                  # part of the mic's name, or its number; blank = Windows default
+MIC_GAIN_DB = _get_float("MIC_GAIN_DB", 0.0)         # extra loudness for a quiet mic; python -m ears.wake suggests one
 # A built-in openWakeWord phrase (hey_jarvis, alexa, hey_mycroft) or the path of your own model,
 # e.g. models/hey_friday.onnx (relative to this folder). Only that phrase wakes her, not other sounds.
 WAKE_MODEL = _get("WAKE_MODEL", "hey_jarvis")

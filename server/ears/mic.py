@@ -44,8 +44,11 @@ def find_device(spec: str):
 
 
 class Mic:
-    def __init__(self, device: str = "") -> None:
+    def __init__(self, device: str = "", gain_db: float = 0.0) -> None:
+        """gain_db: made louder by this much after recording (for a quiet laptop mic). Raising the mic's own
+        level in Windows is better when it goes high enough: it adds less hiss."""
         sd = _sd()
+        self.gain = 10 ** (gain_db / 20)
         self.device = find_device(device)
         try:
             info = sd.query_devices(self.device, "input")
@@ -93,6 +96,8 @@ class Mic:
                 block = resample(block, self.native, RATE)
             self._carry = np.concatenate([self._carry, block])
         frame, self._carry = self._carry[:FRAME], self._carry[FRAME:]
+        if self.gain != 1.0:
+            frame = np.clip(frame.astype(np.float32) * self.gain, -32768, 32767).astype(np.int16)
         return frame
 
 
@@ -110,7 +115,9 @@ def _main() -> None:
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0:
             print(f"  {i:3d}  {d['name']}{'   <- default' if i == default_in else ''}")
-    mic = Mic(sys.argv[1] if len(sys.argv) > 1 else "")
+    import config
+
+    mic = Mic(sys.argv[1] if len(sys.argv) > 1 else config.MIC_DEVICE, config.MIC_GAIN_DB)
     print(f"\nLevel of '{mic.name}' ({mic.native} Hz) for 5 s. Talk:")
     mic.start()
     end = time.time() + 5

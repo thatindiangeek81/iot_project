@@ -56,12 +56,14 @@ def _main() -> None:
 
     wake = WakeWord(sys.argv[1] if len(sys.argv) > 1 else config.WAKE_MODEL)
     vad = SpeechDetector()
-    mic = Mic(config.MIC_DEVICE)
+    mic = Mic(config.MIC_DEVICE, config.MIC_GAIN_DB)
     threshold = config.WAKE_THRESHOLD
-    print(f'Mic: {mic.name} ({mic.native} Hz)\nSay "{wake.phrase}" a few times, normally, from where you\'ll sit. '
+    gain = f", MIC_GAIN_DB {config.MIC_GAIN_DB:g}" if config.MIC_GAIN_DB else ""
+    print(f'Mic: {mic.name} ({mic.native} Hz{gain})\nSay "{wake.phrase}" a few times, normally, from where you\'ll sit. '
           f"It wakes at {threshold} (WAKE_THRESHOLD). Ctrl+C to stop.\n")
     mic.start()
     peak, loudest, speech, n = 0.0, -90.0, 0.0, 0
+    voice: list[float] = []                        # the level of every frame the speech detector called speech
     try:
         while True:
             frame = mic.read()
@@ -72,6 +74,8 @@ def _main() -> None:
             rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
             loudest = max(loudest, 20 * np.log10(max(rms, 1.0) / 32768))
             speech = max(speech, prob)
+            if prob >= 0.5:
+                voice.append(20 * np.log10(max(rms, 1.0) / 32768))
             if score >= 0.1:
                 peak = max(peak, score)
             elif peak:
@@ -87,6 +91,29 @@ def _main() -> None:
         print()
     finally:
         mic.close()
+    _advice(voice)
+
+
+TARGET_DB = -26.0                                  # a comfortable speech level for the wake word and Whisper
+
+
+def _advice(voice: list[float]) -> None:
+    """How loud your voice came in, and the MIC_GAIN_DB that would bring it to a good level."""
+    import config
+
+    if len(voice) < 5:
+        print("\nNo speech heard: check the mic (python -m ears.mic) and that it isn't muted.")
+        return
+    level = float(np.percentile(voice, 90))        # your louder syllables, not the pauses
+    print(f"\nYour voice came in at about {level:.0f} dBFS (a good level is around {TARGET_DB:.0f}).")
+    if level >= TARGET_DB - 6:
+        print("That's loud enough.")
+        return
+    total = config.MIC_GAIN_DB + (TARGET_DB - level)
+    print("Too quiet. Best: turn the mic up in Windows (Settings > System > Sound > Input > volume 100, and\n"
+          "Microphone Boost under More sound settings > Recording > Microphone > Properties > Levels), then run this again.")
+    print(f"If it's already at the top, put this in server\\.env:  MIC_GAIN_DB={min(40, round(total))}")
+
 
 
 if __name__ == "__main__":
