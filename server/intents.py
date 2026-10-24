@@ -25,9 +25,9 @@ import config
 
 # ------------------------------------------------------------------ cleaning up what Whisper heard
 
-_WAKE = re.compile(r"^(?:(?:hey|hi|ok|okay)\s+)?(?:friday|jarvis)\b\s*")
+_WAKE = re.compile(r"^(?:(?:hey|hi|ok|okay)\s+)?(?:friday|jarvis|alexa)\b\s*")
 _LEAD = re.compile(r"^(?:(?:can|could|would|will) you\s+|please\s+|just\s+|now\s+|ok(?:ay)?\s+|so\s+|and\s+|um+\s+|uh+\s+)+")
-_TAIL = re.compile(r"(?:\s+(?:please|for me|now|thanks|thank you|friday|jarvis))+$")
+_TAIL = re.compile(r"(?:\s+(?:please|for me|now|thanks|thank you|friday|jarvis|alexa))+$")
 _NEGATION = re.compile(r"\b(?:dont|do not|never|not|no|cant|cannot|wont|stop asking)\b")
 _QUESTION = re.compile(r"^(?:what|whats|who|whos|why|how|when|where|which|is|are|do|does|did|can|could|would|should|will)\b")
 

@@ -51,6 +51,7 @@ class Cleaning(unittest.TestCase):
         self.assertEqual(intents.normalize("Hey Friday, could you pause the music, please?"), "pause the music")
         self.assertEqual(intents.normalize("Jarvis. What's playing?"), "whats playing")
         self.assertEqual(intents.normalize("Okay, next song, thanks."), "next song")
+        self.assertEqual(intents.normalize("Alexa, volume 40."), "volume 40")
         self.assertEqual(intents.normalize("  "), "")
 
     def test_numbers_in_digits_and_words(self):
