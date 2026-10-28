@@ -611,11 +611,28 @@ def list_devices() -> None:
     print("* = Windows' default output")
 
 
+def check_packages() -> None:
+    """Say which Python this is and what it lacks, with the exact command: the usual trouble is installing the
+    requirements into one Python and running speaker.py with another (a second terminal without the venv)."""
+    import importlib.util
+
+    missing = {m: pip for m, pip in (("sounddevice", "sounddevice"), ("av", "av"), ("serial", "pyserial"))
+               if importlib.util.find_spec(m) is None}
+    if not missing:
+        return
+    print(f"[speaker] this Python ({sys.executable}) is missing: {', '.join(missing.values())}")
+    print(f"          install them into THIS Python:  \"{sys.executable}\" -m pip install {' '.join(missing.values())}")
+    print("          (server.py may be running in a different Python or venv: activate the same one here)")
+    if "sounddevice" in missing or "av" in missing:
+        sys.exit(1)                                  # no sound without these; pyserial only costs the BOOT button
+
+
 def main() -> None:
     try:
         sys.stdout.reconfigure(errors="replace")     # song titles in any script, on a Windows console
     except Exception:
         pass
+    check_packages()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host")
     ap.add_argument("--port", type=int, default=config.HTTP_PORT)
