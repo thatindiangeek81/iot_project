@@ -166,6 +166,38 @@ a single word false-triggers in normal conversation ("it's Friday").
 
 When the INMP441 arrives, the same job moves onto the S3 (ESP-SR WakeNet); the rest of this pipeline stays.
 
+## The laptop as the speaker (Bluetooth board, button only)
+
+The S3 is gone: the ESP32 DevKit is now a plain **Bluetooth speaker** (`friday_speaker/friday_speaker.ino`).
+It has no mic, so the laptop's mic listens, and the wake word is **off** (`WAKE_ENABLED=0` is the default): Friday
+listens only after you press **BOOT** on the board. `speaker.py` plays the voice and the music on the laptop's
+sound output, which Windows sends to the board.
+
+```
+python server.py        # terminal 1: the brain (unchanged)
+python speaker.py       # terminal 2: the button, her voice and your music
+```
+
+1. Flash `friday_speaker/friday_speaker.ino`, then pair **Friday** in Windows (Bluetooth & devices).
+2. Set Windows' sound output to Friday, or pin it: `python speaker.py --out Friday` (`--list-devices` lists them).
+3. Plug the board's USB cable in (BOOT is read over its serial port), close the Arduino Serial Monitor, and run
+   `pip install -r requirements.txt` once (adds `pyserial`).
+4. Press BOOT, wait for the chime, talk. Pressing it while she talks cuts her off and listens again. **Enter** in
+   the `speaker.py` window does the same, so you can test without the board.
+
+What `speaker.py` does for you: the chime and a quiet song while you talk; her voice as it arrives (sentence by
+sentence); songs from your library (play, pause, resume, stop, "volume 60", then the next song by itself) ducked
+under her voice; the volume commands change its own software volume.
+
+| `.env` | Default | |
+|---|---|---|
+| `WAKE_ENABLED` | `0` | `1` brings the wake word (`WAKE_MODEL`, `WAKE_THRESHOLD`) back next to the button |
+| `PTT_PORT` | `auto` | the board's COM port (`COM5`), `auto` to find it, `off` for the Enter key only |
+| `SPEAKER_DEVICE` | blank | part of the sound output's name, or its number; blank = Windows' default |
+| `SPEAKER_VOLUME` | `80` | start volume, 0 to 100 |
+
+`python ptt.py` checks the button on its own: it names the ports it sees and prints every press.
+
 ## Commands without Gemini
 
 Plain commands are answered **on the laptop** (`intents.py`): no tokens, no Gemini round trip, the reply starts

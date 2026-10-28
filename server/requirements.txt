@@ -17,3 +17,7 @@ pyttsx3>=2.90 ; sys_platform == "win32"
 # huggingface_hub, which faster-whisper already installs.
 sounddevice>=0.4.6
 openwakeword>=0.6
+# The laptop as the speaker (speaker.py): plays her voice and your music on a Bluetooth speaker, and reads
+# the board's BOOT button from its USB serial port. PyAV (decodes the MP3 voice and songs) comes with faster-whisper.
+av>=11
+pyserial>=3.5

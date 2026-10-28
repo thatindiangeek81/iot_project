@@ -991,7 +991,10 @@ def start_ears():
     except Exception as exc:
         print(f"[ears] off: {exc}")
         return None
-    print(f"[ears] listening for \"{ears.phrase}\" on {ears.mic_name} (threshold {config.WAKE_THRESHOLD})")
+    if ears.phrase:
+        print(f"[ears] listening for \"{ears.phrase}\" on {ears.mic_name} (threshold {config.WAKE_THRESHOLD})")
+    else:
+        print(f"[ears] button only (WAKE_ENABLED=0): records from {ears.mic_name} after BOOT / Enter in speaker.py")
     return ears
 
 

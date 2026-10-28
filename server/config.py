@@ -111,6 +111,9 @@ WHISPER_HINT = _get("WHISPER_HINT", "A person talking to a voice assistant named
 EARS = _get_bool("EARS", True)                       # 0 = no laptop mic (push-to-talk on the S3 only)
 MIC_DEVICE = _get("MIC_DEVICE", "")                  # part of the mic's name, or its number; blank = Windows default
 MIC_GAIN_DB = _get_float("MIC_GAIN_DB", 0.0)         # extra loudness for a quiet mic; python -m ears.wake suggests one
+# 0 = no wake word at all: Friday only listens after the button (BOOT on the board, see PTT_PORT, or Enter in
+# speaker.py). 1 = also wake on WAKE_MODEL below.
+WAKE_ENABLED = _get_bool("WAKE_ENABLED", False)
 # A built-in openWakeWord phrase (hey_jarvis, alexa, hey_mycroft) or the path of your own model,
 # e.g. models/hey_friday.onnx (relative to this folder). Only that phrase wakes her, not other sounds.
 WAKE_MODEL = _get("WAKE_MODEL", "hey_jarvis")
@@ -122,6 +125,13 @@ EARS_SILENCE_MS = _get_int("EARS_SILENCE_MS", 800)   # this much silence = you'v
 EARS_MAX_S = _get_float("EARS_MAX_S", 12.0)          # longest question
 EARS_VAD_THRESHOLD = _get_float("EARS_VAD_THRESHOLD", 0.5)  # 0..1: how sure the speech detector must be
 LISTEN_HOLD_S = _get_int("LISTEN_HOLD_S", 20)        # an idle GET /listen is held this long, then answered 204
+
+# --- The laptop as the speaker (speaker.py): the ESP32 is a plain Bluetooth speaker ----------------------------
+# speaker.py plays Friday's voice and your music on the laptop's audio output (set Windows to the "Friday"
+# Bluetooth speaker, or name it in SPEAKER_DEVICE) and reads the board's BOOT button from its USB serial port.
+SPEAKER_DEVICE = _get("SPEAKER_DEVICE", "")          # part of the output device's name, or its number; blank = Windows default
+SPEAKER_VOLUME = _get_int("SPEAKER_VOLUME", 80)      # 0..100, software volume (voice commands change it)
+PTT_PORT = _get("PTT_PORT", "auto")                  # the board's COM port, e.g. COM5; "auto" finds it; "off" = Enter key only
 
 # --- Local commands (no Gemini) ----------------------------------------
 # "pause", "next song", "volume 40", "play Kesariya", "what's playing", "what time is it" are answered on the

@@ -31,6 +31,18 @@ HANDOFF_S = 2.5                  # the speaker has this long to pick up a wake w
 SPEAKER_GONE_S = 3.0             # no idle poll for this long (and none waiting) = no speaker to talk to
 
 
+class NoWake:
+    """Stands in for the wake word when WAKE_ENABLED=0: it never fires, so only the button starts a question."""
+
+    phrase = ""
+
+    def score(self, frame: np.ndarray) -> float:
+        return 0.0
+
+    def reset(self) -> None:
+        pass
+
+
 class Ears:
     def __init__(self, mic=None, wake=None, vad=None, clock=time.monotonic) -> None:
         self.mic, self.wake, self.vad = mic, wake, vad      # made in start() unless given (the tests give fakes)
@@ -63,9 +75,12 @@ class Ears:
     def start(self) -> None:
         """Load the models and open the mic. Raises if any of it fails (the server then runs without ears)."""
         if self.wake is None:
-            from .wake import WakeWord
+            if config.WAKE_ENABLED:
+                from .wake import WakeWord
 
-            self.wake = WakeWord(config.WAKE_MODEL)
+                self.wake = WakeWord(config.WAKE_MODEL)
+            else:
+                self.wake = NoWake()             # button only: no openWakeWord model to load
         if self.vad is None:
             from .vad import SpeechDetector
 
