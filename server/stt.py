@@ -21,11 +21,28 @@ HALLUCINATIONS = {
 }
 
 
+def _echoes_hint(key: str) -> bool:
+    """Whisper, given silence or noise, often just says its own prompt back ("A voice assistant named Friday."),
+    and that would be sent to Gemini as if it were a question. Three or more words, nearly all of them from
+    WHISPER_HINT = an echo. A real question has words of its own ("what", "is", "play"...)."""
+    words = key.split()
+    hint_words = re.sub(r"[^a-z0-9]+", " ", (config.WHISPER_HINT or "").lower()).split()
+    if len(words) < 3 or not hint_words:
+        return False
+    if sum(w in set(hint_words) for w in words) / len(words) < 0.8:
+        return False
+    # ...and it must repeat a run of 4 words in the hint's own order (a real question that happens to use
+    # hint words, like "is Friday a voice assistant", doesn't)
+    n = min(4, len(hint_words))
+    runs = {tuple(hint_words[i:i + n]) for i in range(len(hint_words) - n + 1)}
+    return any(tuple(words[i:i + n]) in runs for i in range(len(words) - n + 1))
+
+
 def clean_transcript(text: str) -> str:
-    """Trim, and treat empty or known-hallucination transcripts as nothing heard."""
+    """Trim, and treat empty, known-hallucination or echoed-prompt transcripts as nothing heard."""
     t = re.sub(r"\s+", " ", text or "").strip()
     key = re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
-    if key in HALLUCINATIONS or len(key) < 2:
+    if key in HALLUCINATIONS or len(key) < 2 or _echoes_hint(key):
         return ""
     return t[: config.MAX_INPUT_CHARS]
 
