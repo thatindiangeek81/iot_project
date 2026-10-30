@@ -543,6 +543,43 @@ def _safe_url(url: str | None = None) -> str:
     return url
 
 
+def _secrets(url: str) -> list[str]:
+    """The password in a connection string, as written and URL-decoded (to scrub it from messages)."""
+    from urllib.parse import unquote
+
+    found = []
+    at = url.rfind("@")
+    scheme = url.find("://")
+    if scheme != -1 and at > scheme:
+        userinfo = url[scheme + 3:at]
+        if ":" in userinfo:
+            found.append(userinfo.split(":", 1)[1])
+    for m in re.finditer(r"\bpassword\s*=\s*('(?:[^'\\]|\\.)*'|[^\s&]+)", url, flags=re.I):
+        found.append(m.group(1).strip("'"))
+    out = []
+    for pw in found:
+        for v in (pw, unquote(pw)):
+            if v and len(v) >= 3 and v not in out:
+                out.append(v)
+    return sorted(out, key=len, reverse=True)
+
+
+def _scrub(text: str) -> str:
+    """`text` with the connection string's password removed, however a driver quoted it.
+    Errors from psycopg can echo the whole connection string back (e.g. a malformed one)."""
+    text = str(text)
+    url = config.CORTEX_DATABASE_URL or ""
+    if url:
+        text = text.replace(url, _safe_url(url))
+        for pw in _secrets(url):
+            text = text.replace(pw, "***")
+    return _safe_url(text)
+
+
+def _err(exc: BaseException) -> str:
+    return _scrub(f"{type(exc).__name__}: {exc}")
+
+
 # ---------------------------------------------------------------- the catalog (RAM only on the reply path)
 
 _lock = threading.Lock()
@@ -572,7 +609,7 @@ def _set_catalog(docs: list[dict] | None, error: str = "") -> None:
         _catalog = docs
         _words = catalog_words(docs) if docs else frozenset()
         _status = "ready" if docs is not None else ("down" if error else _status)
-        _last_error = error
+        _last_error = _scrub(error) if error else error
     if docs is not None and (before is None or len(before) != len(docs)):
         print(f"[cortex] {len(docs)} document(s) ready")
     elif docs is None and before is not None:
@@ -585,7 +622,7 @@ def refresh() -> bool:
         docs = _db_catalog()
     except Exception as exc:
         first = _status == "connecting"
-        _set_catalog(None, f"{type(exc).__name__}: {str(exc).strip()[:160]}")
+        _set_catalog(None, _err(exc).strip()[:200])
         if first:
             print(f"[cortex] can't reach {_safe_url()} ({_last_error}); trying again every {RETRY_S} s")
         return False
@@ -667,7 +704,7 @@ def _retrieve(query: str, document: str | None, job: _Job | None = None, top_k: 
     try:
         vec, out["embed_ms"], out["cached"] = _query_vector(query)
     except Exception as exc:
-        out["error"] = f"embedding failed: {exc}"
+        out["error"] = _scrub(f"embedding failed: {exc}")
         print(f"[cortex] {out['error']}")
         return out
     if job is not None and job.abandoned:
@@ -677,7 +714,7 @@ def _retrieve(query: str, document: str | None, job: _Job | None = None, top_k: 
     try:
         rows = _db_search(vec, query, document, top_k, min_similarity, job=job)
     except Exception as exc:
-        out["error"] = f"search failed: {type(exc).__name__}: {str(exc).strip()[:160]}"
+        out["error"] = ("search failed: " + _err(exc).strip())[:200]
         if job is None or not job.abandoned:
             print(f"[cortex] {out['error']}")
         return out
@@ -704,7 +741,7 @@ def _wait(future: Future, timeout: float, job: _Job | None = None) -> dict:
         return {"error": f"the documents took longer than {limit:g} s", "timed_out": True,
                 "embed_ms": None, "search_ms": None}
     except Exception as exc:
-        return {"error": f"{type(exc).__name__}: {exc}", "embed_ms": None, "search_ms": None}
+        return {"error": _err(exc), "embed_ms": None, "search_ms": None}
 
 
 def search(query: str, document: str | None = None, timeout: float | None = None, *,
@@ -721,7 +758,7 @@ def search(query: str, document: str | None = None, timeout: float | None = None
     try:
         future, job = _start(query, (document or "").strip() or None, top_k=top_k, min_similarity=min_similarity)
     except Exception as exc:
-        return {"error": f"{type(exc).__name__}: {exc}"}
+        return {"error": _err(exc)}
     return _wait(future, config.CORTEX_TIMEOUT if timeout is None else timeout, job)
 
 
@@ -765,7 +802,7 @@ class Turn:
         try:
             return _start(self.question)
         except Exception as exc:
-            self.error = f"{type(exc).__name__}: {exc}"
+            self.error = _err(exc)
             return None
 
     def offers_tool(self) -> bool:
@@ -941,7 +978,7 @@ class _LogWorker:
             try:
                 fn(*args)
             except Exception as exc:
-                print(f"[cortex] couldn't save the answer: {type(exc).__name__}: {exc}")
+                print(f"[cortex] couldn't save the answer: {_err(exc)}")
 
 
 _answer_log = _LogWorker()
@@ -1045,7 +1082,7 @@ def _upkeep(stopped: threading.Event) -> None:
     try:
         ok = refresh()
     except Exception as exc:                       # never let the upkeep thread die
-        print(f"[cortex] reading the list of documents failed: {type(exc).__name__}: {exc}")
+        print(f"[cortex] reading the list of documents failed: {_err(exc)}")
     finally:
         _ready.set()
     next_refresh = time.monotonic() + (config.CORTEX_LIST_S if ok else RETRY_S)
@@ -1068,7 +1105,7 @@ def _upkeep(stopped: threading.Event) -> None:
             if config.GEMINI_KEEPALIVE_S > 0 and now - _google_used[0] >= config.GEMINI_KEEPALIVE_S:
                 _warm_google()
         except Exception as exc:
-            print(f"[cortex] upkeep: {type(exc).__name__}: {exc}")
+            print(f"[cortex] upkeep: {_err(exc)}")
 
 
 def _reset_for_tests() -> None:

@@ -12,3 +12,12 @@ mutagen>=1.47
 tzdata ; sys_platform == "win32"
 # Windows voice (used when Piper isn't set up)
 pyttsx3>=2.90 ; sys_platform == "win32"
+# The laptop's ears: its microphone and the wake word ("hey jarvis", or your own "hey friday").
+# The speech detector (Silero) and the local command model (MiniLM) run on onnxruntime, tokenizers and
+# huggingface_hub, which faster-whisper already installs.
+sounddevice>=0.4.6
+openwakeword>=0.6
+# The laptop as the speaker (speaker.py): plays her voice and your music on a Bluetooth speaker, and reads
+# the board's BOOT button from its USB serial port. PyAV (decodes the MP3 voice and songs) comes with faster-whisper.
+av>=11
+pyserial>=3.5

@@ -185,6 +185,25 @@ class Gate(unittest.TestCase):
             self.assertIn("***", safe)
         self.assertEqual(cortex._safe_url("postgresql://u:pw@host:5432/db"), "postgresql://u:***@host:5432/db")
 
+    def test_errors_never_echo_the_password(self):
+        """psycopg echoes a malformed connection string back in its error, password and all."""
+        import psycopg
+
+        bad = "<postgresql://postgres.abc:k?Zz9q#fakePW..x@aws-0-ap-south-1.pooler.supabase.com:5432/postgres, port 5432>"
+        with mock.patch.object(config, "CORTEX_DATABASE_URL", bad):
+            try:
+                psycopg.conninfo.conninfo_to_dict(bad)
+                raise AssertionError("expected a ProgrammingError")
+            except psycopg.Error as exc:
+                self.assertIn("fakePW", str(exc))            # the driver really does echo it
+                for text in (cortex._err(exc), cortex._scrub(str(exc)), cortex._err(exc)[:20]):
+                    self.assertNotIn("fakePW", text)
+                    self.assertNotIn("k?Zz9q", text)
+            cortex._set_catalog(None, "ProgrammingError: missing = after " + bad)
+            self.assertNotIn("fakePW", cortex._last_error)
+        with mock.patch.object(config, "CORTEX_DATABASE_URL", "postgresql://u:p%23ss%3Fword@h:5432/db"):
+            self.assertNotIn("p#ss?word", cortex._scrub("failed for p#ss?word at h"))
+
     def test_spoken_name(self):
         self.assertEqual(cortex.spoken_name("biology-notes.pdf"), "biology notes")
         self.assertEqual(cortex.spoken_name("Router_Manual_v2.txt"), "Router Manual v2")

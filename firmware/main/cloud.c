@@ -516,7 +516,7 @@ static void rx_reset(rx_mode_t mode, const cloud_say_cb_t *cb)
     rx.asked = s_asking;
 }
 
-// One POST to `path`. Returns ESP_OK if an HTTP response (any status) came back.
+// One POST to `path` (a GET when body is NULL). Returns ESP_OK if an HTTP response (any status) came back.
 static esp_err_t post_once(const char *path, const char *body, size_t len, const char *content_type,
                            rx_mode_t mode, const cloud_say_cb_t *cb, int *status)
 {
@@ -528,9 +528,15 @@ static esp_err_t post_once(const char *path, const char *body, size_t len, const
     char url[160];
     snprintf(url, sizeof(url), "%s%s", s_base, path);
     esp_http_client_set_url(s_client, url);        // same host: the connection is kept
-    esp_http_client_set_method(s_client, HTTP_METHOD_POST);
-    esp_http_client_set_header(s_client, "Content-Type", content_type);
-    esp_http_client_set_post_field(s_client, body, (int)len);
+    if (body) {
+        esp_http_client_set_method(s_client, HTTP_METHOD_POST);
+        esp_http_client_set_header(s_client, "Content-Type", content_type);
+        esp_http_client_set_post_field(s_client, body, (int)len);
+    } else {
+        esp_http_client_set_method(s_client, HTTP_METHOD_GET);
+        esp_http_client_delete_header(s_client, "Content-Type");
+        esp_http_client_set_post_field(s_client, NULL, 0);
+    }
     if (cb && cb->music_state) {
         char state[96];
         cb->music_state(state, sizeof(state));
@@ -812,6 +818,175 @@ esp_err_t cloud_ask(const int16_t *pcm, size_t samples, const cloud_say_cb_t *cb
     err = finish_reply(err, status, cb, err_out, err_len, &r);
     if (res) *res = r;
     return err;
+}
+
+/* ------------------------------------------------------------------ */
+/*  The laptop's mic: GET /listen                                      */
+/*                                                                     */
+/*  The idle poll has its own connection and buffer: it waits up to    */
+/*  LISTEN_HOLD_SEC while a typed question may use s_client and rx.    */
+/*  The answer (/listen?wake=n) comes through s_client and rx, like    */
+/*  /ask, by whoever owns the turn.                                    */
+/* ------------------------------------------------------------------ */
+
+#define LISTEN_BODY_MAX 256
+
+static esp_http_client_handle_t s_listen;   // the idle poll's connection, kept open between polls
+static char s_listen_base[40];
+static char s_listen_body[LISTEN_BODY_MAX];
+static int  s_listen_len;
+static int  s_listen_said;                  // last odd status printed, so it's said once
+
+static esp_err_t on_listen_event(esp_http_client_event_t *e)
+{
+    if (e->event_id == HTTP_EVENT_ON_DATA && e->data_len > 0) {
+        int room = LISTEN_BODY_MAX - 1 - s_listen_len;
+        int take = e->data_len < room ? e->data_len : room;
+        if (take > 0) {
+            memcpy(s_listen_body + s_listen_len, e->data, take);
+            s_listen_len += take;
+        }
+    }
+    return ESP_OK;
+}
+
+static void listen_drop(void)
+{
+    if (s_listen) {
+        esp_http_client_cleanup(s_listen);
+        s_listen = NULL;
+    }
+}
+
+int cloud_listen_wait(int hold_s)
+{
+    char ip[16];
+    int  port;
+    if (!USE_LAPTOP || !s_brain_mu || !laptop_get(ip, sizeof(ip), &port)) {
+        return -1;
+    }
+    char base[40];
+    snprintf(base, sizeof(base), "http://%s:%d", ip, port);
+    if (s_listen && strcmp(base, s_listen_base) != 0) {
+        listen_drop();                              // the laptop moved: new connection
+    }
+    if (!s_listen) {
+        char url[64];
+        snprintf(url, sizeof(url), "%s/listen", base);
+        esp_http_client_config_t cfg = {
+            .url            = url,
+            .method         = HTTP_METHOD_GET,
+            .timeout_ms     = (hold_s + 10) * 1000,   // the laptop answers within hold_s
+            .event_handler  = on_listen_event,
+            .buffer_size    = 1024,
+            .buffer_size_tx = 512,
+        };
+        s_listen = esp_http_client_init(&cfg);
+        if (!s_listen) {
+            return -1;
+        }
+        esp_http_client_set_header(s_listen, "X-Device-Token", DEVICE_TOKEN);
+        esp_http_client_set_header(s_listen, "User-Agent", "i2sonic-s3/0.5");
+        strncpy(s_listen_base, base, sizeof(s_listen_base) - 1);
+        s_listen_base[sizeof(s_listen_base) - 1] = '\0';
+    }
+
+    s_listen_len = 0;
+    int64_t t0 = esp_timer_get_time();
+    esp_err_t err = esp_http_client_perform(s_listen);
+    if (err != ESP_OK) {
+        listen_drop();
+        // A quick failure is usually a stale kept-open connection; a laptop that has gone away doesn't
+        // answer the probe either, and is looked for again.
+        if (esp_timer_get_time() - t0 < 5000000 && !net_can_connect(ip, port, LAPTOP_PROBE_MS)) {
+            laptop_lost("is not answering (asleep, off, or friday-local not running)");
+        }
+        return -1;
+    }
+    int status = esp_http_client_get_status_code(s_listen);
+    s_listen_body[s_listen_len] = '\0';
+    if (status == 204) {
+        s_listen_said = 0;
+        return 0;
+    }
+    if (status == 202) {
+        s_listen_said = 0;
+        cJSON *doc = cJSON_Parse(s_listen_body);
+        const cJSON *ev = doc ? cJSON_GetObjectItemCaseSensitive(doc, "event") : NULL;
+        const cJSON *id = doc ? cJSON_GetObjectItemCaseSensitive(doc, "id") : NULL;
+        int wake = cJSON_IsString(ev) && strcmp(ev->valuestring, "wake") == 0 && cJSON_IsNumber(id) ? id->valueint : 0;
+        cJSON_Delete(doc);
+        return wake;
+    }
+    if (status != s_listen_said) {
+        s_listen_said = status;
+        printf("[ears] the laptop answered /listen with HTTP %d%s\n", status,
+               status == 401 ? ": DEVICE_TOKEN in secrets.h doesn't match friday-local's .env" :
+               status == 503 ? ": its mic is off (EARS in friday-local's .env, or see its window)" :
+               status == 404 ? ": friday-local is older than this firmware" : "");
+    }
+    return -1;
+}
+
+esp_err_t cloud_listen_answer(int wake_id, const cloud_say_cb_t *cb,
+                              char *err_out, size_t err_len, cloud_result_t *res)
+{
+    cloud_result_t r = {0};
+    copy_out(err_out, err_len, "");
+    char ip[16];
+    int  port;
+    if (!USE_LAPTOP || !s_brain_mu || !laptop_get(ip, sizeof(ip), &port)) {
+        copy_out(err_out, err_len, "the laptop isn't connected");
+        if (res) *res = r;
+        return ESP_ERR_INVALID_STATE;
+    }
+    char base[80], path[32];
+    snprintf(base, sizeof(base), "http://%s:%d", ip, port);
+    snprintf(path, sizeof(path), "/listen?wake=%d", wake_id);
+    use_base(base);
+    s_used_brain = CLOUD_BRAIN_LAPTOP;
+    s_asking     = true;                            // the reply carries what was heard, like /ask
+
+    int64_t t0 = esp_timer_get_time();
+    int status = 0;
+    esp_err_t err = post_once(path, NULL, 0, NULL, RX_SAY, cb, &status);
+    if (err != ESP_OK && nothing_arrived() && esp_timer_get_time() - t0 < 5000000) {
+        err = post_once(path, NULL, 0, NULL, RX_SAY, cb, &status);   // a stale kept-open connection
+    }
+    r.total_ms = (int)((esp_timer_get_time() - t0) / 1000);
+    r.brain    = CLOUD_BRAIN_LAPTOP;
+    if (err == ESP_OK && status == 202) {           // {"event": "cancel"}: nothing was said
+        if (res) *res = r;
+        return ESP_ERR_NOT_FOUND;
+    }
+    err = finish_reply(err, status, cb, err_out, err_len, &r);
+    if (res) *res = r;
+    return err;
+}
+
+int cloud_listen_press(void)
+{
+    char ip[16];
+    int  port;
+    if (!USE_LAPTOP || !s_brain_mu || !laptop_get(ip, sizeof(ip), &port)) {
+        return 0;
+    }
+    char url[64];
+    snprintf(url, sizeof(url), "http://%s:%d/listen/wake", ip, port);
+    esp_http_client_config_t cfg = {
+        .url        = url,
+        .method     = HTTP_METHOD_POST,
+        .timeout_ms = 3000,
+    };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);   // its own: the other two may be busy
+    if (!c) {
+        return 0;
+    }
+    esp_http_client_set_header(c, "X-Device-Token", DEVICE_TOKEN);
+    esp_http_client_set_post_field(c, "", 0);
+    int status = esp_http_client_perform(c) == ESP_OK ? esp_http_client_get_status_code(c) : 0;
+    esp_http_client_cleanup(c);
+    return status;
 }
 
 const char *cloud_provider_name(int provider)

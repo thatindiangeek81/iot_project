@@ -6,6 +6,8 @@
     python client.py --chat "hi"                 text-only reply  -> /chat
     python client.py --say "play kesariya" --music          as a speaker that can play music
     python client.py --song 12                   download song 12 as the speaker gets it (song.mp3)
+    python client.py --listen                    be the speaker for the laptop's mic: wait for the wake word,
+                                                 then save each answer (reply.mp3). Ctrl+C to stop
 
 Uses DEVICE_TOKEN from .env. Add --host 192.168.x.x to skip discovery.
 """
@@ -27,6 +29,9 @@ import frames
 def find_server(timeout: float = 3.0) -> tuple[str, int] | None:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    if hasattr(socket, "SIO_UDP_CONNRESET"):
+        # Windows: a probe that finds nothing listening would make the next recvfrom fail with WinError 10054
+        s.ioctl(socket.SIO_UDP_CONNRESET, False)
     s.settimeout(0.5)
     end = time.time() + timeout
     targets = ["255.255.255.255", "127.0.0.1"]
@@ -38,8 +43,8 @@ def find_server(timeout: float = 3.0) -> tuple[str, int] | None:
                 pass
         try:
             data, addr = s.recvfrom(64)
-        except socket.timeout:
-            continue
+        except (socket.timeout, ConnectionResetError):
+            continue                                       # nobody answered yet: ask again
         if data.startswith(b"I2SONIC!"):
             port = int(data[8:] or config.HTTP_PORT)
             return addr[0], port
@@ -75,6 +80,7 @@ def main() -> None:
     ap.add_argument("--music", nargs="?", const="state=stopped", metavar="STATE",
                     help='send X-Music-State, e.g. "state=playing;track=12;pos=30;vol=70"')
     ap.add_argument("--song", type=int, metavar="ID", help="fetch /music/<id> into song.mp3")
+    ap.add_argument("--listen", action="store_true", help="wait for the wake word on the laptop's mic, like the S3")
     ap.add_argument("--out", default="reply")
     args = ap.parse_args()
 
@@ -97,6 +103,8 @@ def main() -> None:
         open("song.mp3", "wb").write(data)
         print(f"[saved] song.mp3, {len(data) / 1024:.0f} KB, first bytes after {t * 1000:.0f} ms")
         return
+    if args.listen:
+        return listen(host, port, args.music, args.out)
     if args.chat:
         status, data, t = request(host, port, "/chat", json.dumps({"text": args.chat}).encode(), "application/json",
                                   args.music)
@@ -114,6 +122,35 @@ def main() -> None:
     if status != 200:
         print(f"HTTP {status}: {data.decode(errors='replace')}")
         sys.exit(1)
+    show(data, first_at, args.out)
+
+
+def listen(host: str, port: int, music_state: str | None, out: str) -> None:
+    """What the S3 does with LAPTOP_MIC 1: an idle GET /listen until the wake word, then /listen?wake=n."""
+    print("[listening] say the wake word near the laptop (Ctrl+C to stop)")
+    try:
+        while True:
+            status, data, _ = request(host, port, "/listen", None)
+            if status == 204:
+                continue                                   # nothing in LISTEN_HOLD_S: ask again
+            if status != 202:
+                print(f"HTTP {status}: {data.decode(errors='replace')}")
+                sys.exit(1)
+            wake = json.loads(data)["id"]
+            print(f"[wake] {wake}: talk now")
+            status, data, first_at = request(host, port, f"/listen?wake={wake}", None,
+                                             music_state=music_state or "state=stopped;vol=70")
+            if status == 202:
+                print("[heard] nothing after the wake word")
+            elif status == 200:
+                show(data, first_at, out)
+            else:
+                print(f"HTTP {status}: {data.decode(errors='replace')}")
+    except KeyboardInterrupt:
+        print()
+
+
+def show(data: bytes, first_at: float, out: str) -> None:
     f = frames.parse(data)
     if f["heard"] is not None:
         print(f"[heard] {f['heard'] or '(nothing clear)'}")
@@ -123,10 +160,10 @@ def main() -> None:
     print(f"[time] first bytes {first_at * 1000:.0f} ms | Whisper {f['stt_ms']} ms + Gemini {f['chat_ms']} ms "
           f"+ voice {f['tts_ms']} ms | {len(f['audio']) / 1024:.0f} KB of audio")
     if f["format"] == frames.FORMAT_MP3:
-        out = args.out + ".mp3"
+        out = out + ".mp3"
         open(out, "wb").write(f["audio"])
     else:
-        out = args.out + ".wav"
+        out = out + ".wav"
         with wave.open(out, "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
