@@ -105,6 +105,9 @@ class Assistant:
 
         t0 = time.time()
         raw = self.stt.transcribe(normalize(pcm))
+        import langs
+
+        langs.set_turn(self.stt.language)            # the reply is in the language that was spoken
         return clean_transcript(raw), raw, int((time.time() - t0) * 1000)
 
     def think(self, heard: str, music_state: str | None = None) -> dict:

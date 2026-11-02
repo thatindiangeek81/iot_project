@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 import config
+import langs
 from audio_utils import bytes_to_pcm, load_wav, resample
 from speech import Stop
 
@@ -161,7 +162,7 @@ class _EdgeVoice:
         import edge_tts
 
         async def run() -> bytes:
-            com = edge_tts.Communicate(for_neural_voice(text), config.EDGE_VOICE, rate=config.EDGE_RATE,
+            com = edge_tts.Communicate(for_neural_voice(text), langs.voice_for(text), rate=config.EDGE_RATE,
                                        pitch=config.EDGE_PITCH)
             buf = bytearray()
             async for chunk in com.stream():
@@ -210,7 +211,7 @@ class _EdgeVoice:
         import edge_tts
 
         async def run() -> None:
-            com = edge_tts.Communicate(for_neural_voice(text), config.EDGE_VOICE, rate=config.EDGE_RATE,
+            com = edge_tts.Communicate(for_neural_voice(text), langs.voice_for(text), rate=config.EDGE_RATE,
                                        pitch=config.EDGE_PITCH)
             got = 0
             async for chunk in com.stream():
@@ -246,7 +247,7 @@ class _EdgeVoice:
 
         def worker() -> None:
             async def run() -> None:
-                com = edge_tts.Communicate(for_neural_voice(text), config.EDGE_VOICE, rate=config.EDGE_RATE,
+                com = edge_tts.Communicate(for_neural_voice(text), langs.voice_for(text), rate=config.EDGE_RATE,
                                            pitch=config.EDGE_PITCH)
                 async for chunk in com.stream():
                     if chunk.get("type") == "audio" and chunk.get("data"):
@@ -305,7 +306,8 @@ def split_first_sentence(text: str, min_chars: int = 12) -> tuple[str, str]:
     """("First sentence.", "The rest of it.") or (text, "") when it's one sentence."""
     import re
 
-    for m in re.finditer(r"[.!?](?=\s+[A-Z0-9\"'])", text):
+    # a sentence ends at . ! ? or the Hindi danda, and the next one starts with a capital, digit, quote or Indian letter
+    for m in re.finditer(r"[.!?।](?=\s+[A-Z0-9\"'ऀ-ൿ])", text):
         if m.end() >= min_chars:
             first, rest = text[:m.end()].strip(), text[m.end():].strip()
             return (first, rest) if len(rest) >= 2 else (text, "")
@@ -346,7 +348,7 @@ def _cache_path(text: str) -> Path | None:
         return None
     import hashlib
 
-    key = hashlib.sha1(f"{config.EDGE_VOICE}|{config.EDGE_RATE}|{config.EDGE_PITCH}|{text}".encode()).hexdigest()[:16]
+    key = hashlib.sha1(f"{langs.voice_for(text)}|{config.EDGE_RATE}|{config.EDGE_PITCH}|{text}".encode()).hexdigest()[:16]
     return Path(config.TTS_CACHE_DIR) / f"{key}.mp3"
 
 

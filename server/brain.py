@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import config
 import cortex
 import gemini
+import langs
 from memory import Memory
 
 PERSONA = (
@@ -83,6 +84,10 @@ TOOLS = [
           {"key": {"type": "string", "description": "e.g. name, city, wake_time"},
            "value": {"type": "string"}}, ["key", "value"]),
 ]
+LANGUAGE_TOOL = _tool(
+    "set_reply_language", "Choose the language of your reply. Call it when the user asks to translate something or to "
+    "answer in a language other than the one they spoke, before writing the reply.",
+    {"language": {"type": "string", "description": "e.g. Hindi, Marathi, Gujarati, English"}}, ["language"])
 WEATHER_TOOL = _tool(
     "get_weather", "Current weather plus today's and tomorrow's forecast for a place. Use for any weather, "
     "temperature, rain or 'should I take an umbrella' question.",
@@ -157,7 +162,7 @@ def for_speech(text: str) -> str:
     limit = config.MAX_REPLY_CHARS
     if len(out) > limit:
         cut = out[:limit]
-        end = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "))
+        end = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "), cut.rfind("। "))
         out = cut[: end + 1] if end > limit / 2 else cut.rstrip() + "..."
     return out
 
@@ -166,7 +171,7 @@ def for_speech(text: str) -> str:
 
 _ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "no", "approx", "inc", "ltd",
                   "co", "e.g", "i.e", "a.m", "p.m", "u.s", "u.k", "a.i"}
-_END_MARK = re.compile(r"([.!?]+[\"')\]]*)(\s+)|(\n+)")
+_END_MARK = re.compile(r"([.!?।॥]+[\"')\]]*)(\s+)|(\n+)")     # । = the Hindi full stop (danda)
 
 
 def _is_abbreviation(text: str) -> bool:
@@ -360,6 +365,7 @@ class Brain:
             parts.append("\n" + NO_MUSIC)
         if self._cortex is not None:
             parts.append("\n" + self._cortex.prompt_block())
+        parts.append(langs.prompt_block(langs.turn()))
         parts.append(STYLE_EXAMPLES)
         return "\n".join(parts)
 
@@ -378,6 +384,8 @@ class Brain:
                 result = "saved"
             elif name in ("play_music", "music_control", "check_new_music") and self.jukebox:
                 result = self._music_tool(name, args)
+            elif name == "set_reply_language":
+                result = langs.set_reply_language(str(args.get("language", "")))
             elif name == "get_weather":
                 import weather
 
@@ -441,7 +449,7 @@ class Brain:
         messages = [{"role": "system", "content": self._system(heard, ctx)}]
         messages += ctx["history"]
         messages.append({"role": "user", "content": heard})
-        tools = TOOLS + [WEATHER_TOOL] + ([SEARCH_TOOL] if config.WEB_SEARCH else []) + (MUSIC_TOOLS if jukebox else [])
+        tools = TOOLS + [LANGUAGE_TOOL, WEATHER_TOOL] + ([SEARCH_TOOL] if config.WEB_SEARCH else []) + (MUSIC_TOOLS if jukebox else [])
         if self._cortex is not None and self._cortex.offers_tool():
             tools = tools + [DOCS_TOOL]
         timing = {"prompt_ms": int((time.time() - started) * 1000), "gemini_ms": [], "tool_ms": 0, "fast": False}

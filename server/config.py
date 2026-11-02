@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+# Hindi, Marathi and Gujarati text in the logs would crash a print() on a Windows console that isn't UTF-8.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 
 def _load_dotenv() -> None:
@@ -100,7 +108,9 @@ CORTEX_LOG_ANSWERS = _get_bool("CORTEX_LOG_ANSWERS", True)       # keep document
 
 # --- Speech recognition (faster-whisper) ------------------------------
 WHISPER_MODEL = _get("WHISPER_MODEL", "base")
+# en = always English. auto = detect which of LANGUAGES you spoke (Hindi, Marathi...) and answer in it.
 WHISPER_LANGUAGE = _get("WHISPER_LANGUAGE", "en") or None
+LANGUAGES = _get("LANGUAGES", "en,hi,mr,gu")           # languages Friday understands and speaks (see langs.py)
 WHISPER_DEVICE = _get("WHISPER_DEVICE", "cpu")        # cpu | cuda (falls back to cpu if CUDA fails)
 WHISPER_COMPUTE = _get("WHISPER_COMPUTE", "int8")     # int8 on cpu, int8_float16 on cuda
 WHISPER_HINT = _get("WHISPER_HINT", "A person talking to a voice assistant named Friday.")

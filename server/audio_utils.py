@@ -72,7 +72,7 @@ def split_sentences(text: str, max_chars: int = 180) -> list[str]:
     for word in text.split():
         candidate = f"{current} {word}".strip()
         current = candidate
-        ends_sentence = word.endswith((".", "!", "?", ":", ";"))
+        ends_sentence = word.endswith((".", "!", "?", ":", ";", "।"))
         if ends_sentence or len(current) >= max_chars:
             parts.append(current)
             current = ""
