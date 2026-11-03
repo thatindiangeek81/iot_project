@@ -463,7 +463,6 @@ class Speaker:
         self.phase = "idle"                  # idle | listening (recording you) | replying (reading and playing)
         self.cancel = threading.Event()      # set by the button: drop the reply that's being read
         self.token_headers = {"X-Device-Token": config.DEVICE_TOKEN}
-        self.ptt = None
 
     # --- the button
 
@@ -578,26 +577,6 @@ class Speaker:
         elif what == "stop":
             self.music.stop()
 
-        result = action if "actions" in (action or {}) else {"actions": action}
-        tool_name = (result.get("actions") or {}).get("tool_name") or (action or {}).get("tool_name") or (action or {}).get("tool")
-        tool_args = (result.get("actions") or {}).get("tool_args") or (action or {}).get("tool_args") or action or {}
-        if tool_name == "light_control":
-            action_cmd = tool_args.get("action", "")
-            if action_cmd and hasattr(self, "ptt") and self.ptt:
-                self.ptt.send(action_cmd.upper())
-            reply = {
-                "light1_on":  "Light one is on.",
-                "light1_off": "Light one is off.",
-                "light2_on":  "Light two is on.",
-                "light2_off": "Light two is off.",
-                "both_on":    "Both lights are on.",
-                "both_off":   "Both lights are off.",
-            }.get(action_cmd, "Done.")
-
-        light_cmd = (result.get("actions") or {}).get("light")
-        if light_cmd and hasattr(self, "ptt") and self.ptt and tool_name != "light_control":
-            self.ptt.send(light_cmd.upper())
-
     def run(self) -> None:
         while True:
             try:
@@ -690,8 +669,7 @@ def main() -> None:
         try:
             import ptt
 
-            speaker.ptt = ptt.SerialButton(args.ptt, on_press=speaker.press)
-            speaker.ptt.start()
+            ptt.SerialButton(args.ptt, on_press=speaker.press).start()
         except RuntimeError as exc:
             print(f"[speaker] no BOOT button: {exc}. Enter still works")
     if sys.stdin and sys.stdin.isatty():

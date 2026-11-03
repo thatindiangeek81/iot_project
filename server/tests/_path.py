@@ -4,8 +4,7 @@ import os
 import pathlib
 import sys
 
-# Keep the tests away from the real Cortex database that this laptop's .env may point at: an empty value
-# here wins over .env (config only fills in what isn't set). Cortex tests switch it on with a fake.
-os.environ["CORTEX_DATABASE_URL"] = ""
+# A Groq key in this laptop's .env would turn the Gemini rate-limit tests into real fallback calls.
+os.environ["GROQ_API_KEY"] = ""
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))

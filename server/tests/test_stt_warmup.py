@@ -49,7 +49,7 @@ class Warmup(unittest.TestCase):
         make(model).warmup()
         for _audio, kw in model.calls:
             self.assertEqual(kw["beam_size"], 1)
-            self.assertEqual(kw["language"], config.WHISPER_LANGUAGE)
+            self.assertEqual(kw["language"], None if config.WHISPER_LANGUAGE == "auto" else config.WHISPER_LANGUAGE)
             self.assertFalse(kw["condition_on_previous_text"])
 
     def test_a_failure_never_stops_the_server_starting(self):

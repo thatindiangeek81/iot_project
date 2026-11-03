@@ -18,6 +18,19 @@ There are two hardware options, both driven by the same laptop brain:
 | ESP32-S3 (original) | ESP32-S3 board (`firmware/`) | Onboard mic, or the laptop's mic | Hold BOOT, or say "Hey Jarvis" near the laptop |
 | Bluetooth speaker | Plain ESP32 DevKit + MAX98357A amp (`friday_speaker/`) | The laptop's mic only | Press the board's BOOT button, or Enter in `speaker.py` |
 
+## Languages
+
+She understands and answers in **English, Hindi, Marathi and Gujarati**. Speak in one of them (Hinglish
+is fine) and she replies in the same language, in the matching neural voice. You can also ask her to
+translate: "translate to Marathi: where is the station". Everything runs on the laptop; the board only plays
+audio. Turn it on in `server/.env`:
+
+```
+WHISPER_LANGUAGE=auto          # detect what you spoke (en = English only, the old behaviour)
+LANGUAGES=en,hi,mr,gu          # add bn, ta, te, kn, ml or ur for more (see server/langs.py)
+WHISPER_MODEL=small            # base is faster but hears Marathi and Gujarati worse
+```
+
 ## How it works
 
 Every question goes through the same four stages, whichever board asked it:
@@ -29,7 +42,7 @@ Every question goes through the same four stages, whichever board asked it:
    right here and answered immediately, with no Gemini round trip.
 3. **Think** — anything else goes to **Gemini**, along with her memory (profile, facts,
    recent conversation, from PostgreSQL) and whatever tools the question needs: web search,
-   weather, music control, or Cortex (your uploaded documents). If the laptop is off, the
+   weather or music control. If the laptop is off, the
    **Cloudflare Worker** answers instead, with no memory or music.
 4. **Speak** — the reply becomes audio (an Irish neural voice online, Piper or the Windows
    voice offline) and streams to whichever board asked, mixed under any music that's playing.
@@ -42,7 +55,7 @@ Every question goes through the same four stages, whichever board asked it:
         │
         │ everything else
         ▼
- Gemini ── memory (Postgres) ── web search / weather ── music control ── Cortex (your docs)
+ Gemini ── memory (Postgres) ── web search / weather ── music control
         │
         ▼
  voice (Edge / Piper / SAPI) ──▶ board plays it back, music ducked underneath
@@ -57,8 +70,6 @@ She also learns by herself in the background (`AUTO_MEMORY`), without slowing a 
 | [`server/`](server) | The laptop brain in Python: hearing, Gemini + tools, memory, voice, music library |
 | [`worker/`](worker) | Cloudflare Worker used as the backup brain |
 | [`db/`](db) | PostgreSQL + Adminer in Docker: Friday's memory |
-| [`cortex-web/`](cortex-web) | Cortex upload side, hosted on Vercel: upload page + ingest (parse, chunk, embed into Supabase pgvector). See [`docs/cortex.md`](docs/cortex.md) |
-| [`Cortex/`](Cortex) | The original Cortex RAG project; its parser was reused in `cortex-web/`. Friday no longer calls it |
 | [`docs/`](docs) | [Architecture overview](docs/architecture.html) and [why replies take the time they do](docs/latency.md) |
 
 ## Running it

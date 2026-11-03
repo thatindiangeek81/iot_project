@@ -41,7 +41,7 @@ def _echoes_hint(key: str) -> bool:
 def clean_transcript(text: str) -> str:
     """Trim, and treat empty, known-hallucination or echoed-prompt transcripts as nothing heard."""
     t = re.sub(r"\s+", " ", text or "").strip()
-    key = re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
+    key = re.sub(r"[^a-z0-9؀-ۿऀ-ൿ]+", " ", t.lower()).strip()   # Latin and Indian scripts
     if key in HALLUCINATIONS or len(key) < 2 or _echoes_hint(key):
         return ""
     return t[: config.MAX_INPUT_CHARS]
@@ -70,7 +70,8 @@ class STT:
         hiss = (np.random.default_rng(0).standard_normal(config.SAMPLE_RATE) * 800).astype(np.int16)
         try:
             for vad in (False, True):
-                segments, _info = self._model.transcribe(pcm_to_float(hiss), language=config.WHISPER_LANGUAGE,
+                segments, _info = self._model.transcribe(pcm_to_float(hiss),
+                                                         language=None if config.WHISPER_LANGUAGE == "auto" else config.WHISPER_LANGUAGE,
                                                          beam_size=1, vad_filter=vad,
                                                          condition_on_previous_text=False)
                 for _ in segments:                 # the segments are made lazily: this is what runs the model
@@ -80,15 +81,37 @@ class STT:
             return
         print(f"[stt] warmed up in {int((time.time() - t0) * 1000)} ms")
 
-    def transcribe(self, pcm: np.ndarray) -> str:
-        """pcm: int16 mono at config.SAMPLE_RATE. Returns the raw text it heard."""
-        segments, _info = self._model.transcribe(
-            pcm_to_float(pcm),
-            language=config.WHISPER_LANGUAGE,
+    language = "en"                            # the language of the last question (see transcribe)
+
+    def _run(self, audio, language: str | None):
+        segments, info = self._model.transcribe(
+            audio,
+            language=language,
             beam_size=1,
             vad_filter=True,                   # drops the silence a noisy mic leaves behind
             vad_parameters={"min_silence_duration_ms": 300},
             condition_on_previous_text=False,  # stops one bad guess poisoning the next
-            initial_prompt=config.WHISPER_HINT or None,
+            # the English hint would pull a Hindi sentence towards English
+            initial_prompt=(config.WHISPER_HINT or None) if language == "en" else None,
         )
-        return " ".join(s.text.strip() for s in segments).strip()
+        return " ".join(s.text.strip() for s in segments).strip(), info
+
+    def transcribe(self, pcm: np.ndarray) -> str:
+        """pcm: int16 mono at config.SAMPLE_RATE. Returns the raw text it heard; self.language is the language
+        it was in. With WHISPER_LANGUAGE=auto, Whisper picks the best of config.LANGUAGES (a language outside
+        the list, e.g. Welsh heard in noise, is never chosen)."""
+        audio = pcm_to_float(pcm)
+        if config.WHISPER_LANGUAGE != "auto":
+            self.language = config.WHISPER_LANGUAGE or "en"
+            return self._run(audio, config.WHISPER_LANGUAGE)[0]
+        import langs
+
+        allowed = langs.enabled()
+        text, info = self._run(audio, None)
+        lang = info.language
+        if lang not in allowed:
+            probs = dict(getattr(info, "all_language_probs", None) or [])
+            lang = max(allowed, key=lambda c: probs.get(c, 0.0))
+            text, info = self._run(audio, lang)          # heard again as the language it most likely was
+        self.language = lang
+        return text

@@ -73,15 +73,6 @@ class SerialButton:
         self._thread = threading.Thread(target=self._run, name="ptt", daemon=True)
         self._thread.start()
 
-    def send(self, cmd: str) -> None:
-        """Write a command string to the board over USB serial (e.g. 'LED1_ON')."""
-        try:
-            ser = getattr(self, "_ser", None)
-            if ser and ser.is_open:
-                ser.write((cmd + "\n").encode())
-        except Exception as exc:
-            self.log(f"[ptt] send error: {exc}")
-
     def stop(self) -> None:
         self._stop.set()
 
@@ -90,7 +81,6 @@ class SerialButton:
             threading.Thread(target=cb, daemon=True).start()     # never hold up the serial reader
 
     def _run(self) -> None:
-        self._ser = None
         serial, _ = _serial()
         warned = ""
         while not self._stop.is_set():
@@ -108,7 +98,6 @@ class SerialButton:
                 ser.dtr = False                  # opening a port normally resets an ESP32 board: don't
                 ser.rts = False
                 ser.open()
-                self._ser = ser
             except (serial.SerialException, OSError) as exc:
                 if warned != port:
                     self.log(f"[ptt] can't open {port}: {exc} (another program using it?)")

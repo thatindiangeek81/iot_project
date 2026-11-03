@@ -45,8 +45,6 @@
 #define PIN_BUTTON 13
 #define PIN_LED    2     // onboard LED on most ESP32 DevKits
 #define PIN_PTT    0     // BOOT button: push-to-talk, sent to the laptop over USB serial
-#define PIN_LED1   4
-#define PIN_LED2   5
 
 #define DEVICE_NAME      "Friday"
 #define START_VOLUME     80      // 0-127; connected devices then control it
@@ -63,19 +61,12 @@ bool longHandled = false;
 unsigned long reconnectResumeAt = 0;
 bool pttDown = false;
 
-bool effectRunning = false;
-unsigned long lastEffectToggle = 0;
-bool effectState = false;
-#define EFFECT_INTERVAL 300   // milliseconds between alternating blinks
-
 void setup() {
   Serial.begin(115200);
 
   pinMode(PIN_LED, OUTPUT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_PTT, INPUT_PULLUP);
-  pinMode(PIN_LED1, OUTPUT);
-  pinMode(PIN_LED2, OUTPUT);
 
   // Wake the amp (SD floating = shutdown)
   pinMode(PIN_AMP_SD, OUTPUT);
@@ -105,51 +96,6 @@ void handlePTT() {
     changedAt = millis();
     Serial.println(down ? "PTT 1" : "PTT 0");
   }
-}
-
-void handleSerial() {
-  while (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-    if      (cmd == "LIGHT1_ON")  { effectRunning = false; digitalWrite(PIN_LED1, HIGH); Serial.println("[LIGHT] Light1 ON"); }
-    else if (cmd == "LIGHT1_OFF") { effectRunning = false; digitalWrite(PIN_LED1, LOW);  Serial.println("[LIGHT] Light1 OFF"); }
-    else if (cmd == "LIGHT2_ON")  { effectRunning = false; digitalWrite(PIN_LED2, HIGH); Serial.println("[LIGHT] Light2 ON"); }
-    else if (cmd == "LIGHT2_OFF") { effectRunning = false; digitalWrite(PIN_LED2, LOW);  Serial.println("[LIGHT] Light2 OFF"); }
-    else if (cmd == "BOTH_ON") {
-        effectRunning = false;
-        digitalWrite(PIN_LED1, HIGH);
-        digitalWrite(PIN_LED2, HIGH);
-        Serial.println("[LIGHT] Both ON");
-    }
-    else if (cmd == "BOTH_OFF") {
-        effectRunning = false;
-        digitalWrite(PIN_LED1, LOW);
-        digitalWrite(PIN_LED2, LOW);
-        Serial.println("[LIGHT] Both OFF");
-    }
-    else if (cmd == "EFFECT_ON") {
-        effectRunning = true;
-        lastEffectToggle = millis();
-        effectState = false;
-        Serial.println("[LIGHT] Effect ON");
-    }
-    else if (cmd == "EFFECT_OFF") {
-        effectRunning = false;
-        digitalWrite(PIN_LED1, LOW);
-        digitalWrite(PIN_LED2, LOW);
-        Serial.println("[LIGHT] Effect OFF");
-    }
-  }
-}
-
-void handleEffect() {
-    if (!effectRunning) return;
-    if (millis() - lastEffectToggle >= EFFECT_INTERVAL) {
-        lastEffectToggle = millis();
-        effectState = !effectState;
-        digitalWrite(PIN_LED1, effectState ? HIGH : LOW);
-        digitalWrite(PIN_LED2, effectState ? LOW : HIGH);
-    }
 }
 
 void handleButton() {
@@ -184,8 +130,6 @@ void handleButton() {
 }
 
 void loop() {
-  handleSerial();
-  handleEffect();
   handlePTT();
   handleButton();
 

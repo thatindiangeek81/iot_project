@@ -93,14 +93,6 @@ RULES: list[tuple[str, re.Pattern]] = [(name, re.compile(rx)) for name, rx in [
     ("time", r"(?:whats|what is) the time(?: now)?|what time is it(?: now)?|time|tell me the time|current time"),
     ("date", r"(?:whats|what is) (?:the date|todays date|the day)(?: today)?|what day is (?:it|today)|todays date|whats today"),
     ("shuffle", r"play|play (?:some |a |any |me )?(?:music|song|songs|something|anything)|play my (?:music|songs|library)|shuffle(?: my| the)?(?: music| songs| library)?"),
-    ("light1_on",  r"(?:turn |switch )?(?:on )?light (?:one|1|first)|light (?:one|1) on"),
-    ("light1_off", r"(?:turn |switch )?off light (?:one|1|first)|light (?:one|1) off"),
-    ("light2_on",  r"(?:turn |switch )?(?:on )?light (?:two|2|second)|light (?:two|2) on"),
-    ("light2_off", r"(?:turn |switch )?off light (?:two|2|second)|light (?:two|2) off"),
-    ("both_on",    r"(?:turn |switch )?(?:on )?both(?: lights?)?|lights? both on|turn (?:on )?all lights?"),
-    ("both_off",   r"(?:turn |switch )?off both(?: lights?)?|lights? both off|turn off all lights?"),
-    ("effect_on",  r"(?:start|begin|enable|turn on)(?: the)? effect|blink(?: the)? lights?|start blink(?:ing)?"),
-    ("effect_off", r"(?:stop|end|disable|turn off)(?: the)? effect|stop blink(?:ing)?"),
 ]]
 
 _PLAY = re.compile(r"(?:play|put on|queue|add) (?P<q>.+?)")
@@ -123,14 +115,6 @@ EXAMPLES: dict[str, list[str]] = {
     "volume_down": ["turn the volume down", "make it quieter", "the music is too loud", "lower the volume a bit"],
     "what_playing": ["what song is this", "who sings this song", "what is playing right now", "what is the name of this song"],
     "time": ["what time is it", "tell me the current time", "what is the time right now"],
-    "light1_on":  ["turn on light one", "switch on light 1", "light one on", "light 1 on"],
-    "light1_off": ["turn off light one", "switch off light 1", "light one off", "light 1 off"],
-    "light2_on":  ["turn on light two", "switch on light 2", "light two on", "light 2 on"],
-    "light2_off": ["turn off light two", "switch off light 2", "light two off", "light 2 off"],
-    "both_on":    ["turn on both lights", "switch on both", "both lights on", "turn on all lights"],
-    "both_off":   ["turn off both lights", "switch off both", "both lights off", "turn off all lights"],
-    "effect_on":  ["start effect", "start the effect", "blink the lights", "start blinking"],
-    "effect_off": ["turn off effect", "stop the effect", "stop blinking", "stop the blink"],
 }
 QUESTIONS_OK = {"what_playing", "time", "date"}       # the only commands that may be phrased as a question
 MUSIC = {"pause", "resume", "stop", "next", "previous", "restart", "volume_up", "volume_down", "set_volume",
@@ -288,19 +272,6 @@ class Router:
             return self._music(name, *jb.control("set_volume", level), how)
         if name == "max_volume":
             return self._music(name, *jb.control("set_volume", 100), how)
-        if name in ("light1_on", "light1_off", "light2_on", "light2_off",
-                    "both_on", "both_off", "effect_on", "effect_off"):
-            replies = {
-                "light1_on":  "Light one is on.",
-                "light1_off": "Light one is off.",
-                "light2_on":  "Light two is on.",
-                "light2_off": "Light two is off.",
-                "both_on":    "Both lights are on.",
-                "both_off":   "Both lights are off.",
-                "effect_on":  "Starting light effect.",
-                "effect_off": "Effect stopped.",
-            }
-            return Local(name, replies[name], action={"light": name}, how=how)
         return self._music(name, *jb.control(name), how)
 
     def _play(self, query: str, text: str, jb) -> Local | None:

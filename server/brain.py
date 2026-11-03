@@ -14,8 +14,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import config
-import cortex
 import gemini
+import langs
 from memory import Memory
 
 PERSONA = (
@@ -40,7 +40,6 @@ PERSONA = (
     "When the user asks you to remember something, call save_memory. When they ask what you know or what they told you, call recall_memory if the answer isn't already below. "
     "When they ask you to forget something, call forget_memory. When they tell you their name, city or a similar basic detail, call update_profile. "
     "For weather, temperature or rain, call get_weather (it's fast and exact). For news, prices, scores, sports, opening hours or anything else that may have changed recently, call web_search instead of guessing. "
-    "You can control two physical lights connected to the speaker hardware. If the user asks to turn on or off light one, light two, both lights, or uses similar phrasing (even if slightly mispronounced), respond with ONLY a JSON tool call — do not speak a sentence. The available tool actions are: light1_on, light1_off, light2_on, light2_off, both_on, both_off. Example: if the user says 'turn on like 2' or 'switch on light two', call the light tool with action=light2_on. "
     "You can't control other devices or set timers yet; say so briefly if asked. Never pretend to have done something you didn't do. "
     # Ethics and safety
     "Be kind, respectful and fair to everyone. On contested political or religious questions, give balanced facts rather than taking a side. "
@@ -83,13 +82,11 @@ TOOLS = [
     _tool("update_profile", "Store a basic detail about the user, such as name, city, language or wake-up time.",
           {"key": {"type": "string", "description": "e.g. name, city, wake_time"},
            "value": {"type": "string"}}, ["key", "value"]),
-    _tool("light_control",
-          "Turn physical lights on or off. Use this whenever the user asks to control light one, light two, or both lights — even if the wording is approximate or mispronounced.",
-          {"action": {"type": "string",
-                      "enum": ["light1_on", "light1_off", "light2_on", "light2_off", "both_on", "both_off"],
-                      "description": "Which light action to perform"}},
-          ["action"]),
 ]
+LANGUAGE_TOOL = _tool(
+    "set_reply_language", "Choose the language of your reply. Call it when the user asks to translate something or to "
+    "answer in a language other than the one they spoke, before writing the reply.",
+    {"language": {"type": "string", "description": "e.g. Hindi, Marathi, Gujarati, English"}}, ["language"])
 WEATHER_TOOL = _tool(
     "get_weather", "Current weather plus today's and tomorrow's forecast for a place. Use for any weather, "
     "temperature, rain or 'should I take an umbrella' question.",
@@ -132,17 +129,6 @@ MUSIC_RULES = (
 )
 NO_MUSIC = "You can't play music on this speaker right now (the laptop's music library isn't connected); say so briefly if asked."
 
-DOCS_TOOL = _tool(
-    "search_documents", "Find the answer in the user's own uploaded documents (notes, PDFs, manuals, Word files). "
-    "Use it whenever the user asks about their documents, notes or files, or about a topic one of them covers.",
-    {"query": {"type": "string", "description": "The question as a clear, standalone search, with obvious mishearings "
-               "fixed, e.g. 'what is the function of mitochondria'"},
-     "document": {"type": "string", "description": "Optional: only search this document. A filename, or part of one, "
-                  "from the list of the user's documents. Leave it out unless the user named a document"}},
-    ["query"])
-# The prompt text about documents lives in cortex.py, next to the code that decides which of it to use.
-
-
 def clean_for_speech(text: str) -> str:
     """Strip anything that sounds wrong when spoken."""
     out = re.sub(r"```[\s\S]*?```", " ", text or "")
@@ -164,7 +150,7 @@ def for_speech(text: str) -> str:
     limit = config.MAX_REPLY_CHARS
     if len(out) > limit:
         cut = out[:limit]
-        end = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "))
+        end = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "), cut.rfind("। "))
         out = cut[: end + 1] if end > limit / 2 else cut.rstrip() + "..."
     return out
 
@@ -173,7 +159,7 @@ def for_speech(text: str) -> str:
 
 _ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "no", "approx", "inc", "ltd",
                   "co", "e.g", "i.e", "a.m", "p.m", "u.s", "u.k", "a.i"}
-_END_MARK = re.compile(r"([.!?]+[\"')\]]*)(\s+)|(\n+)")
+_END_MARK = re.compile(r"([.!?।॥]+[\"')\]]*)(\s+)|(\n+)")     # । = the Hindi full stop (danda)
 
 
 def _is_abbreviation(text: str) -> bool:
@@ -336,7 +322,6 @@ class Brain:
         self._actions: dict = {}     # what this turn asks the speaker to do (play, pause, volume)
         self._music_results: list = []   # this round's music tool results, for quick replies
         self._music_ok = lambda: True    # False once a streamed reply has started: music can't change any more
-        self._cortex = None              # this turn's use of the user's documents (None = Cortex is off)
         try:
             self.tz = ZoneInfo(config.TIMEZONE)   # on Windows this needs the tzdata package
         except Exception:
@@ -365,8 +350,7 @@ class Brain:
             parts.append("\n" + MUSIC_RULES + "\n" + self.jukebox.describe())
         else:
             parts.append("\n" + NO_MUSIC)
-        if self._cortex is not None:
-            parts.append("\n" + self._cortex.prompt_block())
+        parts.append(langs.prompt_block(langs.turn()))
         parts.append(STYLE_EXAMPLES)
         return "\n".join(parts)
 
@@ -385,6 +369,8 @@ class Brain:
                 result = "saved"
             elif name in ("play_music", "music_control", "check_new_music") and self.jukebox:
                 result = self._music_tool(name, args)
+            elif name == "set_reply_language":
+                result = langs.set_reply_language(str(args.get("language", "")))
             elif name == "get_weather":
                 import weather
 
@@ -394,23 +380,6 @@ class Brain:
                 import search
 
                 result = search.web_search(str(args.get("query", "")))
-            elif name == "light_control":
-                action = str(args.get("action") or "")
-                if action:
-                    self._actions["light"] = action
-                    self._actions["tool_name"] = name
-                    self._actions["tool_args"] = args
-                reply = {
-                    "light1_on":  "Light one is on.",
-                    "light1_off": "Light one is off.",
-                    "light2_on":  "Light two is on.",
-                    "light2_off": "Light two is off.",
-                    "both_on":    "Both lights are on.",
-                    "both_off":   "Both lights are off.",
-                }.get(action, "Done.")
-                result = reply
-            elif name == "search_documents" and self._cortex is not None and self._cortex.offers_tool():
-                result = self._cortex.tool(str(args.get("query", "")), str(args.get("document") or ""))
             else:
                 result = {"error": f"unknown tool {name}"}
         except gemini.GeminiError as exc:
@@ -455,20 +424,12 @@ class Brain:
         self._actions = {}
         self._music_results = []
         self._music_ok = lambda: True
-        # Cortex first: an obvious document question starts its retrieval now and runs while memory builds the
-        # prompt; the prompt waits for the passages only at the very end (bounded by CORTEX_TIMEOUT). Choosing the
-        # path is RAM only: nothing here waits on the network for an ordinary question.
-        self._cortex = cortex.Turn(heard) if cortex.enabled() else None
         ctx = self.memory.begin_turn()
         messages = [{"role": "system", "content": self._system(heard, ctx)}]
         messages += ctx["history"]
         messages.append({"role": "user", "content": heard})
-        tools = TOOLS + [WEATHER_TOOL] + ([SEARCH_TOOL] if config.WEB_SEARCH else []) + (MUSIC_TOOLS if jukebox else [])
-        if self._cortex is not None and self._cortex.offers_tool():
-            tools = tools + [DOCS_TOOL]
+        tools = TOOLS + [LANGUAGE_TOOL, WEATHER_TOOL] + ([SEARCH_TOOL] if config.WEB_SEARCH else []) + (MUSIC_TOOLS if jukebox else [])
         timing = {"prompt_ms": int((time.time() - started) * 1000), "gemini_ms": [], "tool_ms": 0, "fast": False}
-        if self._cortex is not None:
-            timing["prompt_ms"] = max(0, timing["prompt_ms"] - self._cortex.timing["rag_ms"])
         return started, ctx, messages, tools, timing
 
     @staticmethod
@@ -506,13 +467,6 @@ class Brain:
                "ms": int((time.time() - started) * 1000),
                "episode_id": ctx["episode_id"], "new_session": ctx["new_session"],
                "previous_id": ctx["previous_id"], "citations": []}
-        cx = self._cortex
-        if cx is not None:
-            timing.update(cx.timing)
-            summary = cx.summary()
-            if summary is not None:                # the documents were used for this answer
-                out["citations"] = cx.citations(raw)
-                out["cortex"] = summary
         return out
 
     def answer(self, heard: str, jukebox=None) -> dict:
@@ -562,7 +516,6 @@ class Brain:
         for round_no in range(config.MAX_TOOL_ROUNDS + 1):
             last_round = round_no == config.MAX_TOOL_ROUNDS
             chunker, budget = SentenceChunker(), SpeechBudget(config.MAX_REPLY_CHARS)
-            marks = MarkerFilter() if self._cortex is not None else None     # [n] can't be spoken, however it's cut
             written: list[str] = []
             info: dict = {}
             first_ms = None
@@ -578,7 +531,7 @@ class Brain:
                         msg = value
                         continue
                     written.append(value)
-                    for sentence in chunker.feed(marks.feed(value) if marks else value):
+                    for sentence in chunker.feed(value):
                         if self._emit(sentence, budget, sink) and first_ms is None:
                             first_ms = int((time.time() - started) * 1000)
                     if budget.full:
@@ -593,9 +546,6 @@ class Brain:
             calls = (msg or {}).get("tool_calls") or []
             if not calls:
                 if not budget.full:
-                    for sentence in (chunker.feed(marks.flush()) if marks else []):
-                        if self._emit(sentence, budget, sink) and first_ms is None:
-                            first_ms = int((time.time() - started) * 1000)
                     tail = chunker.flush()
                     if tail and self._emit(tail, budget, sink) and first_ms is None:
                         first_ms = int((time.time() - started) * 1000)
@@ -638,8 +588,6 @@ class Brain:
         name = fn.get("name", "")
         if name == "web_search":
             return bool(config.WEB_SEARCH)
-        if name == "search_documents":
-            return self._cortex is not None and self._cortex.tool_is_slow()
         if name == "get_weather":
             try:
                 args = json.loads(fn.get("arguments") or "{}")

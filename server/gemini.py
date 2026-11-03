@@ -3,7 +3,7 @@
   chat()    OpenAI-compatible chat endpoint, with function tools (same endpoint the Worker uses)
   chat_stream()  the same, streamed: the first words arrive while the rest is still being written
   search()  native generateContent with the built-in Google Search tool
-  embed()   native embedContent, for memory similarity and Cortex question embeddings
+  embed()   native embedContent, for memory similarity
   warm()    keep the connection to Google open and alive (see keepalive_start)
 """
 
@@ -54,7 +54,7 @@ def _touch() -> None:
 
 def _post(url: str, body: dict, headers: dict, timeout: float | None = None,
           session: requests.Session | None = None) -> dict:
-    """`session`: another kept-alive session to send it on (Cortex has its own); default the shared one."""
+    """`session`: another kept-alive session to send it on; default the shared one."""
     try:
         r = (session or _get_session()).post(url, json=body, headers=headers, timeout=timeout or config.GEMINI_TIMEOUT)
     except requests.Timeout:
@@ -610,8 +610,7 @@ def search(query: str) -> str:
 def embed(text: str, task_type: str | None = None, dims: int | None = None, model: str | None = None,
           session: requests.Session | None = None, timeout: float = 10) -> list[float]:
     """Unit-length embedding of `text` (EMBED_DIMS numbers, or `dims`).
-    Memory calls it with no options, as it always has. Cortex asks for task_type="RETRIEVAL_QUERY",
-    dims=768 and model="gemini-embedding-001" (what its documents were embedded with), on its own session."""
+    Memory calls it with no options. `task_type`, `dims` and `model` override the defaults."""
     body = {
         "content": {"parts": [{"text": text[:2000]}]},
         "outputDimensionality": dims or config.EMBED_DIMS,
